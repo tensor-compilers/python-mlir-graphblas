@@ -1,0 +1,481 @@
+from typing import Optional, Union
+from .tensor import SparseObject, SparseTensor, SparseTensorBase, Matrix, Vector, Scalar, TransposedMatrix
+from .operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
+from . descriptor import Descriptor, NULL as NULL_DESC
+from .exceptions import (
+    GrbNullPointer, GrbInvalidValue, GrbInvalidIndex, GrbDomainMismatch,
+    GrbDimensionMismatch, GrbOutputNotEmpty, GrbIndexOutOfBounds, GrbEmptyObject
+)
+from . import implementations as impl
+from .utils import ensure_scalar_of_type
+from .types import INT64
+from .operators import BinaryOp, SelectOp
+from mlir.dialects.sparse_tensor import DimLevelType
+
+
+__all__ = ["transpose", "ewise_add", "ewise_mult", "mxm", "apply", "select",
+           "reduce_to_vector", "reduce_to_scalar"]
+
+
+# TODO: at some point, it may make sense to make this logic embeddable within
+#       the MLIR-generating code; that could get complicated fast, so for now
+#       this will be kept separate
+def update(output: SparseObject,
+           tensor: SparseObject,
+           mask: Optional[SparseTensor] = None,
+           accum: Optional[BinaryOp] = None,
+           desc: Descriptor = NULL_DESC):
+    """
+    This function assumes that if a mask is supplied, it has already been applied to `tensor`
+
+    There are six possible results based on presence of mask, accum, replace:
+
+    Mask | Accum | Replace | Result
+    -----|-------|---------|---------
+      Y  |   Y   |    Y    | Mask the output, then perform eWiseAdd using accum
+      Y  |   Y   |    N    | Perform eWiseAdd using accum
+      N  |   Y   |    ?    | Perform eWiseAdd using accum
+      Y  |   N   |    Y    | Set input as output
+      Y  |   N   |    N    | Apply inverted mask, then perform eWiseAdd using any op
+      N  |   N   |    ?    | Set input as output
+
+    """
+    if output.shape != tensor.shape:
+        raise ValueError(f"shape mismatch in update: {output.shape} != {tensor.shape}")
+
+    if isinstance(output, Scalar):
+        if mask is not None:
+            raise ValueError("mask not allowed for Scalar update")
+        if accum is None or output._obj is None:
+            output.set_element(tensor.extract_element())
+        else:
+            raise NotImplementedError("scalar accumulation not yet implemented")
+        return
+
+    if not isinstance(output, SparseTensor):
+        raise TypeError(f"output must be Scalar, Vector or Matrix, not {type(output)}")
+
+    if output._obj is None:
+        # accum, mask, replace are meaningless if output is empty
+        result = tensor
+    elif accum is None:
+        if mask is None or desc.replace:
+            result = tensor
+        else:
+            # Apply inverted mask, then eWiseAdd
+            desc_inverted = Descriptor(mask_complement=not desc.mask_complement,
+                                       mask_structure=desc.mask_structure)
+            output._replace(impl.apply_mask(output, mask, desc_inverted))
+            result = impl.ewise_add(BinaryOp.oneb, output, tensor)
+    elif mask is None or not desc.replace:
+        # eWiseAdd using accum
+        result = impl.ewise_add(accum, output, tensor)
+    else:
+        # Mask the output, then perform eWiseAdd using accum
+        output._replace(impl.apply_mask(output, mask, desc))
+        result = impl.ewise_add(accum, output, tensor)
+
+    # If not an intermediate result, make a copy
+    if not result._intermediate_result:
+        result = impl.dup(result)
+
+    output._replace(result)
+
+
+def transpose(out: Matrix,
+              tensor: Matrix,
+              *,
+              mask: Optional[SparseTensor] = None,
+              accum: Optional[BinaryOp] = None,
+              desc: Descriptor = NULL_DESC):
+    # Verify dtypes
+    if out.dtype != tensor.dtype:
+        raise GrbDomainMismatch(f"output type must be {tensor.dtype}, not {out.dtype}")
+
+    # Apply descriptor transpose
+    if tensor.ndims != 2:
+        raise TypeError(f"transpose requires Matrix, not {type(tensor)}")
+    if desc.transpose0:
+        tensor = TransposedMatrix.wrap(tensor)
+
+    # Compare shapes
+    expected_out_shape = (tensor.shape[1], tensor.shape[0])
+    if out.shape != expected_out_shape:
+        raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {expected_out_shape}")
+
+    result = TransposedMatrix.wrap(tensor)
+
+    if mask is not None:
+        result = impl.apply_mask(result, mask, desc)
+
+    update(out, result, mask, accum, desc)
+
+
+def ewise_add(out: SparseTensor,
+              op: BinaryOp,
+              left: SparseTensor,
+              right: SparseTensor,
+              *,
+              mask: Optional[SparseTensor] = None,
+              accum: Optional[BinaryOp] = None,
+              desc: Descriptor = NULL_DESC):
+    # Normalize op
+    if type(op) is Semiring:
+        op = op.monoid
+    if type(op) is Monoid:
+        op = op.binop
+    if type(op) is not BinaryOp:
+        raise TypeError(f"op must be BinaryOp, Monoid, or Semiring")
+
+    # Verify dtypes
+    if op.output is not None:
+        raise GrbDomainMismatch("op must return same type as inputs with ewise_add")
+    if left.dtype != right.dtype:
+        raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
+    if out.dtype != left.dtype:
+        raise GrbDomainMismatch(f"output type must be {left.dtype}, not {out.dtype}")
+
+    # Apply transposes
+    if desc.transpose0 and left.ndims == 2:
+        left = TransposedMatrix.wrap(left)
+    if desc.transpose1 and right.ndims == 2:
+        right = TransposedMatrix.wrap(right)
+
+    # Compare shapes
+    if left.shape != right.shape:
+        raise GrbDimensionMismatch(f"inputs shape mismatch: {left.shape} != {right.shape}")
+    if out.shape != left.shape:
+        raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {left.shape}")
+
+    if mask is not None:
+        left = impl.apply_mask(left, mask, desc)
+        right = impl.apply_mask(right, mask, desc)
+
+    result = impl.ewise_add(op, left, right)
+    update(out, result, mask, accum, desc)
+
+
+def ewise_mult(out: SparseTensor,
+               op: BinaryOp,
+               left: SparseTensor,
+               right: SparseTensor,
+               *,
+               mask: Optional[SparseTensor] = None,
+               accum: Optional[BinaryOp] = None,
+               desc: Descriptor = NULL_DESC):
+    # Normalize op
+    if type(op) is not BinaryOp:
+        if hasattr(op, 'binop'):
+            op = op.binop
+        else:
+            raise TypeError(f"op must be BinaryOp, Monoid, or Semiring")
+
+    # Verify dtypes
+    if left.dtype != right.dtype:
+        raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
+    required_out_dtype = op.get_output_type(left.dtype)
+    if out.dtype != required_out_dtype:
+        raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
+
+    # Apply transposes
+    if desc.transpose0 and left.ndims == 2:
+        left = TransposedMatrix.wrap(left)
+    if desc.transpose1 and right.ndims == 2:
+        right = TransposedMatrix.wrap(right)
+
+    # Compare shapes
+    if left.shape != right.shape:
+        raise GrbDimensionMismatch(f"inputs shape mismatch: {left.shape} != {right.shape}")
+    if out.shape != left.shape:
+        raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {left.shape}")
+
+    if mask is not None:
+        # Only need to apply mask to one of the inputs
+        left = impl.apply_mask(left, mask, desc)
+
+    result = impl.ewise_mult(op, left, right)
+    update(out, result, mask, accum, desc)
+
+
+def mxm(out: Matrix,
+        op: Semiring,
+        left: Matrix,
+        right: Matrix,
+        *,
+        mask: Optional[SparseTensor] = None,
+        accum: Optional[BinaryOp] = None,
+        desc: Descriptor = NULL_DESC):
+    # Verify op
+    if type(op) is not Semiring:
+        raise TypeError(f"op must be Semiring, not {type(op)}")
+
+    # Verify dtypes
+    if left.dtype != right.dtype:
+        raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
+    required_out_dtype = op.binop.get_output_type(left.dtype)
+    if out.dtype != required_out_dtype:
+        raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
+
+    # Apply transposes
+    if left.ndims != right.ndims != 2:
+        raise GrbDimensionMismatch("mxm requires rank 2 tensors")
+    if desc.transpose0:
+        left = TransposedMatrix.wrap(left)
+    if desc.transpose1:
+        right = TransposedMatrix.wrap(right)
+
+    # Compare shapes
+    if left.shape[1] != right.shape[0]:
+        raise GrbDimensionMismatch("incompatible input shapes for mxm")
+    expected_out_shape = (left.shape[0], right.shape[1])
+    if out.shape != expected_out_shape:
+        raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {expected_out_shape}")
+
+    # Check for compatible iteration schemes
+    #  - rowwise x rowwise => rowwise expanded access pattern
+    #  - rowwise x colwise => rowwise lex insert
+    #  - colwise x colwise => colwise expanded access pattern
+    #  - colwise x rowwise => <illegal>
+    if left.is_colwise() and right.is_rowwise():
+        # TODO: handle this by reordering whichever has fewer nvals
+        raise NotImplementedError("The particular iteration pattern (colwise x rowwise) is not yet support for mxm")
+
+    # TODO: apply the mask during the computation, not at the end
+    result = impl.mxm(op, left, right)
+    if mask is not None:
+        result = impl.apply_mask(result, mask, desc)
+    update(out, result, mask, accum, desc)
+
+
+def mxv(out: Vector,
+        op: Semiring,
+        left: Matrix,
+        right: Vector,
+        *,
+        mask: Optional[SparseTensor] = None,
+        accum: Optional[BinaryOp] = None,
+        desc: Descriptor = NULL_DESC):
+    # Verify op
+    if type(op) is not Semiring:
+        raise TypeError(f"op must be Semiring, not {type(op)}")
+
+    # Verify dtypes
+    if left.dtype != right.dtype:
+        raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
+    required_out_dtype = op.binop.get_output_type(left.dtype)
+    if out.dtype != required_out_dtype:
+        raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
+
+    # Apply transpose
+    if left.ndims != 2:
+        raise GrbDimensionMismatch("mxv requires matrix as first input")
+    if desc.transpose0:
+        left = TransposedMatrix.wrap(left)
+
+    # Compare shapes
+    if right.ndims != 1:
+        raise GrbDimensionMismatch("mxv requires vector as second input")
+    if left.shape[1] != right.shape[0]:
+        raise GrbDimensionMismatch("incompatible input shapes for mxv")
+    if out.shape != (left.shape[0],):
+        raise GrbDimensionMismatch(f"output size should be {left.shape[0]} not {out.shape[0]}")
+
+    # TODO: apply the mask during the computation, not at the end
+    result = impl.mxv(op, left, right)
+    if mask is not None:
+        result = impl.apply_mask(result, mask, desc)
+    update(out, result, mask, accum, desc)
+
+
+def vxm(out: Vector,
+        op: Semiring,
+        left: Vector,
+        right: Matrix,
+        *,
+        mask: Optional[SparseTensor] = None,
+        accum: Optional[BinaryOp] = None,
+        desc: Descriptor = NULL_DESC):
+    # Verify op
+    if type(op) is not Semiring:
+        raise TypeError(f"op must be Semiring, not {type(op)}")
+
+    # Verify dtypes
+    if left.dtype != right.dtype:
+        raise GrbDomainMismatch(f"inputs must have same dtype: {left.dtype} != {right.dtype}")
+    required_out_dtype = op.binop.get_output_type(left.dtype)
+    if out.dtype != required_out_dtype:
+        raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
+
+    # Apply transpose
+    if right.ndims != 2:
+        raise GrbDimensionMismatch("vxm requires matrix as second input")
+    if desc.transpose1:
+        right = TransposedMatrix.wrap(right)
+
+    # Compare shapes
+    if left.ndims != 1:
+        raise GrbDimensionMismatch("vxm requires vector as first input")
+    if left.shape[0] != right.shape[0]:
+        raise GrbDimensionMismatch("incompatible input shapes for vxm")
+    if out.shape != (right.shape[1],):
+        raise GrbDimensionMismatch(f"output size should be {right.shape[1]} not {out.shape[0]}")
+
+    # TODO: apply the mask during the computation, not at the end
+    result = impl.vxm(op, left, right)
+    if mask is not None:
+        result = impl.apply_mask(result, mask, desc)
+    update(out, result, mask, accum, desc)
+
+
+def apply(out: SparseTensor,
+          op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
+          tensor: SparseTensor,
+          *,
+          left: Optional[Scalar] = None,
+          right: Optional[Scalar] = None,
+          thunk: Optional[Scalar] = None,
+          mask: Optional[SparseTensor] = None,
+          accum: Optional[BinaryOp] = None,
+          desc: Descriptor = NULL_DESC):
+    # Validate op and required scalars
+    optype = type(op)
+    if optype is UnaryOp:
+        if thunk is not None or left is not None or right is not None:
+            raise TypeError("UnaryOp does not accept thunk, left, or right")
+    elif optype is BinaryOp:
+        if thunk is not None:
+            raise TypeError("BinaryOp accepts left or thing, not thunk")
+        if left is None and right is None:
+            raise TypeError("BinaryOp requires either left or right")
+        if left is not None and right is not None:
+            raise TypeError("Cannot provide both left and right")
+        if left is not None:
+            left = ensure_scalar_of_type(left, tensor.dtype)
+        else:
+            right = ensure_scalar_of_type(right, tensor.dtype)
+    elif optype is IndexUnaryOp:
+        if left is not None or right is not None:
+            raise TypeError("IndexUnaryOp accepts thunk, not left or right")
+        thunk_dtype = INT64 if op.thunk_as_index else tensor.dtype
+        thunk = ensure_scalar_of_type(thunk, thunk_dtype)
+    else:
+        raise TypeError(f"op must be UnaryOp, BinaryOp, or IndexUnaryOp, not {type(op)}")
+
+    # Verify dtype
+    required_out_dtype = op.get_output_type(tensor.dtype)
+    if out.dtype != required_out_dtype:
+        raise GrbDomainMismatch(f"output type must be {required_out_dtype}, not {out.dtype}")
+
+    # Apply transpose
+    if desc.transpose0 and tensor.ndims == 2:
+        tensor = TransposedMatrix.wrap(tensor)
+
+    # Compare shapes
+    if out.shape != tensor.shape:
+        raise GrbDimensionMismatch(f"output shape must match input shape: {out.shape} != {tensor.shape}")
+
+    if mask is not None:
+        tensor = impl.apply_mask(tensor, mask, desc)
+
+    # Check for inplace apply (out == tensor, Unary/Binary, no masks, no accum, etc)
+    if (
+            out is tensor
+            and optype is not IndexUnaryOp
+            and mask is None
+            and accum is None
+            and desc is NULL_DESC
+            and not tensor._intermediate_result
+    ):
+        impl.apply(op, tensor, left, right, None, inplace=True)
+    else:
+        result = impl.apply(op, tensor, left, right, thunk)
+        update(out, result, mask, accum, desc)
+
+
+def select(out: SparseTensor,
+           op: SelectOp,
+           tensor: SparseTensor,
+           thunk: Scalar,
+           *,
+           mask: Optional[SparseTensor] = None,
+           accum: Optional[BinaryOp] = None,
+           desc: Descriptor = NULL_DESC):
+    # Verify op
+    if type(op) is not SelectOp:
+        raise TypeError(f"op must be SelectOp, not {type(op)}")
+
+    # Verify dtypes
+    if out.dtype != tensor.dtype:
+        raise GrbDomainMismatch(f"output dtype must match input dtype: {out.dtype} != {tensor.dtype}")
+    thunk_dtype = INT64 if op.thunk_as_index else tensor.dtype
+    thunk = ensure_scalar_of_type(thunk, thunk_dtype)
+
+    # Apply transpose
+    if desc.transpose0 and tensor.ndims == 2:
+        tensor = TransposedMatrix.wrap(tensor)
+
+    # Compare shapes
+    if out.shape != tensor.shape:
+        raise GrbDimensionMismatch(f"output shape must match input shape: {out.shape} != {tensor.shape}")
+
+    if mask is not None:
+        tensor = impl.apply_mask(tensor, mask, desc)
+
+    result = impl.select(op, tensor, thunk)
+    update(out, result, mask, accum, desc)
+
+
+def reduce_to_vector(out: Vector,
+                     op: Monoid,
+                     tensor: Matrix,
+                     *,
+                     mask: Optional[Vector] = None,
+                     accum: Optional[BinaryOp] = None,
+                     desc: Descriptor = NULL_DESC):
+    # Verify op
+    if type(op) is not Monoid:
+        raise TypeError(f"op must be Monoid, not {type(op)}")
+
+    # Verify dtypes
+    if out.dtype != tensor.dtype:
+        raise GrbDomainMismatch(f"output dtype must match input dtype: {out.dtype} != {tensor.dtype}")
+
+    # Apply transpose
+    if tensor.ndims != 2:
+        raise GrbDimensionMismatch("reduce_to_vector requires matrix input")
+    if desc.transpose0:
+        tensor = TransposedMatrix.wrap(tensor)
+
+    # Compare shapes
+    if out.ndims != 1:
+        raise GrbDimensionMismatch("reduce_to_vector requires vector output")
+    if out.shape != (tensor.shape[0],):
+        raise GrbDimensionMismatch(f"output size should be {tensor.shape[0]} not {out.shape[0]}")
+
+    # TODO: apply the mask during the computation, not at the end
+    result = impl.reduce_to_vector(op, tensor)
+    if mask is not None:
+        result = impl.apply_mask(result, mask, desc)
+    update(out, result, mask, accum, desc)
+
+
+def reduce_to_scalar(out: Scalar,
+                     op: Monoid,
+                     tensor: SparseTensor,
+                     *,
+                     accum: Optional[BinaryOp] = None,
+                     desc: Descriptor = NULL_DESC):
+    # Verify op
+    if type(op) is not Monoid:
+        raise TypeError(f"op must be Monoid, not {type(op)}")
+
+    # Verify dtypes
+    if out.dtype != tensor.dtype:
+        raise GrbDomainMismatch(f"output dtype must match input dtype: {out.dtype} != {tensor.dtype}")
+
+    # Compare shapes
+    if out.ndims != 0:
+        raise GrbDimensionMismatch("reduce_to_scalar requires scalar output")
+
+    result = impl.reduce_to_scalar(op, tensor)
+    update(out, result, accum=accum, desc=desc)
