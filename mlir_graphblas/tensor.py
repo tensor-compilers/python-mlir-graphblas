@@ -119,6 +119,9 @@ class SparseTensorBase(SparseObject):
         self._rtt = None
         self._intermediate_result = False
 
+    def extract_tuples(self):
+        raise NotImplementedError()
+
 
 class SparseTensor(SparseTensorBase):
     def clear(self):
@@ -459,3 +462,7 @@ class TransposedMatrix(SparseTensorBase):
     def clear(self):
         super().clear()
         self._referenced_matrix = None
+
+    def extract_tuples(self):
+        col_indices, row_indices, values = self._referenced_matrix.extract_tuples()
+        return row_indices, col_indices, values

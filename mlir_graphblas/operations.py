@@ -1,3 +1,4 @@
+import numpy as np
 from typing import Optional, Union
 from .tensor import SparseObject, SparseTensor, SparseTensorBase, Matrix, Vector, Scalar, TransposedMatrix
 from .operators import UnaryOp, BinaryOp, SelectOp, IndexUnaryOp, Monoid, Semiring
@@ -479,3 +480,58 @@ def reduce_to_scalar(out: Scalar,
 
     result = impl.reduce_to_scalar(op, tensor)
     update(out, result, accum=accum, desc=desc)
+
+
+def extract(out: SparseTensor,
+            tensor: SparseTensorBase,
+            row_indices=None,
+            col_indices=None,
+            *,
+            mask: Optional[Vector] = None,
+            accum: Optional[BinaryOp] = None,
+            desc: Descriptor = NULL_DESC):
+    """
+    Setting row_indices or col_indices to `None` is the equivalent of GrB_ALL
+    """
+    # Verify dtypes
+    if out.dtype != tensor.dtype:
+        raise GrbDomainMismatch(f"output must have same dtype as input: {out.dtype} != {tensor.dtype}")
+
+    # Apply transpose
+    if desc.transpose0 and tensor.ndims == 2:
+        tensor = TransposedMatrix.wrap(tensor)
+
+    # Check indices
+    if tensor.ndims < 1:
+        raise TypeError("Use `extract_element` rather than `extract` for Scalars")
+    if tensor.ndims < 2 and col_indices is not None:
+        raise ValueError("col_indices not allowed for Vector, use row_indices")
+
+    # Compare shapes
+    if type(row_indices) is int and type(col_indices) is int:
+        raise TypeError("Cannot provide int for both row_indices and col_indices")
+    if type(row_indices) is int:
+        expected_out_shape = (tensor.shape[1],)
+    elif type(col_indices) is int:
+        expected_out_shape = (tensor.shape[0],)
+    else:
+        expected_out_shape = tensor.shape
+    if out.shape != expected_out_shape:
+        raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {expected_out_shape}")
+
+    if mask is not None:
+        tensor = impl.apply_mask(tensor, mask, desc)
+
+    result = impl.extract(tensor, row_indices, col_indices)
+    update(out, result, mask, accum, desc)
+
+
+def assign(out: SparseTensor,
+           tensor: SparseObject,
+           row_indices=None,
+           col_indices=None,
+           *,
+           mask: Optional[Vector] = None,
+           accum: Optional[BinaryOp] = None,
+           desc: Descriptor = NULL_DESC):
+    raise NotImplementedError()

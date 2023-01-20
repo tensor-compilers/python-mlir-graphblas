@@ -900,3 +900,45 @@ def _build_reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
         return compile(module)
+
+
+def extract(tensor: SparseTensorBase, row_indices, col_indices=None):
+    # There may be a way to do this in MLIR, but for now we use numpy
+    if tensor.ndims == 1:
+        # Vector
+        assert col_indices is None
+        if row_indices is None:  # None indicate GrB_ALL
+            return tensor.dup()
+        rowidx, vals = tensor.extract_tuples()
+        selected = np.isin(rowidx, row_indices)
+        v = Vector.new(tensor.dtype, *tensor.shape)
+        v.build(rowidx[selected], vals[selected])
+        return v
+
+    # Matrix
+    if row_indices is None and col_indices is None:
+        return tensor.dup()
+    rowidx, colidx, vals = tensor.extract_tuples()
+    if row_indices is not None:
+        rowsel = np.isin(rowidx, row_indices)
+        # Apply rowsel filter
+        rowidx, colidx, vals = rowidx[rowsel], colidx[rowsel], vals[rowsel]
+    if col_indices is not None:
+        colsel = np.isin(colidx, col_indices)
+        # Apply colsel filter
+        rowidx, colidx, vals = rowidx[colsel], colidx[colsel], vals[colsel]
+    if type(row_indices) is int:
+        # Extract row as Vector
+        assert np.all(rowidx == row_indices)
+        v = Vector.new(tensor.dtype, tensor.shape[1])
+        v.build(colidx, vals)
+        return v
+    if type(col_indices) is int:
+        # Extract col as Vector
+        assert np.all(colidx == col_indices)
+        v = Vector.new(tensor.dtype, tensor.shape[0])
+        v.build(rowidx, vals)
+        return v
+    m = Matrix.new(tensor.dtype, *tensor.shape)
+    m.build(rowidx, colidx, vals)
+    return m

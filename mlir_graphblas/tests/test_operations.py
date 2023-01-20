@@ -202,14 +202,14 @@ def test_select_vec(vs):
     operations.select(z, SelectOp.rowgt, x, 2)
     idx, vals = z.extract_tuples()
     np_assert_equal(idx, [3])
-    np_assert_equal(vals, [30.])
+    np_assert_allclose(vals, [30.])
 
     # Select by value
     z = Vector.new(x.dtype, x.size())
     operations.select(z, SelectOp.valuegt, x, 10.)
     idx, vals = z.extract_tuples()
     np_assert_equal(idx, [2, 3])
-    np_assert_equal(vals, [20., 30.])
+    np_assert_allclose(vals, [20., 30.])
 
 
 def test_select_mat(mm):
@@ -220,7 +220,7 @@ def test_select_mat(mm):
     rowidx, colidx, vals = z.extract_tuples()
     np_assert_equal(rowidx, [0, 1, 1, 2])
     np_assert_equal(colidx, [4, 0, 4, 3])
-    np_assert_equal(vals, [6., 1., 8., 2.])
+    np_assert_allclose(vals, [6., 1., 8., 2.])
 
     # Transposed
     z = Matrix.new(y.dtype, y.shape[1], y.shape[0])
@@ -229,7 +229,7 @@ def test_select_mat(mm):
     rowidx, colidx, vals = z.extract_tuples()
     np_assert_equal(rowidx, [0, 0, 0])
     np_assert_equal(colidx, [1, 3, 5])
-    np_assert_equal(vals, [1., 5., 7.])
+    np_assert_allclose(vals, [1., 5., 7.])
 
 
 def test_empty_select():
@@ -275,3 +275,61 @@ def test_reduce_scalar_vec(vs):
     s = Scalar.new(x.dtype)
     operations.reduce_to_scalar(s, Monoid.times, x)
     np_assert_allclose(s.extract_element(), functools.reduce(operator.mul, xvals))
+
+
+def test_extract_vec(vs):
+    x, _ = vs
+    xidx, xvals = x.extract_tuples()
+    z = Vector.new(x.dtype, *x.shape)
+    operations.extract(z, x, [0, 1, 3])
+    idx, vals = z.extract_tuples()
+    np_assert_equal(idx, [1, 3])
+    np_assert_allclose(vals, [10., 30.])
+
+    # None == GrB_ALL
+    operations.extract(z, x, None)
+    idx, vals = z.extract_tuples()
+    np_assert_equal(idx, xidx)
+    np_assert_allclose(vals, xvals)
+
+
+def test_extract_mat(mm):
+    x, _ = mm
+    xrows, xcols, xvals = x.extract_tuples()
+    z = Matrix.new(x.dtype, *x.shape)
+    operations.extract(z, x, [0, 4], [1, 3, 5])
+    rowidx, colidx, vals = z.extract_tuples()
+    np_assert_equal(rowidx, [0, 0])
+    np_assert_equal(colidx, [3, 5])
+    np_assert_allclose(vals, [1.1, 2.2])
+
+    # None == GrB_ALL
+    operations.extract(z, x, None, None)
+    rowidx, colidx, vals = z.extract_tuples()
+    np_assert_equal(rowidx, xrows)
+    np_assert_equal(colidx, xcols)
+    np_assert_allclose(vals, xvals)
+
+
+def test_extract_vec_from_mat(mm):
+    x, _ = mm
+    # Extract column
+    z = Vector.new(x.dtype, x.shape[0])
+    operations.extract(z, x, [0, 1, 4], 3)
+    idx, vals = z.extract_tuples()
+    np_assert_equal(idx, [0, 1])
+    np_assert_allclose(vals, [1.1, 3.3])
+
+    # Extract row
+    z = Vector.new(x.dtype, x.shape[1])
+    operations.extract(z, x, 2, [0, 1, 4])
+    idx, vals = z.extract_tuples()
+    np_assert_equal(idx, [0, 1])
+    np_assert_allclose(vals, [4.4, 5.5])
+
+    # Extract column via transposed input
+    z = Vector.new(x.dtype, x.shape[0])
+    operations.extract(z, x, 3, [0, 1, 4], desc=desc.T0)
+    idx, vals = z.extract_tuples()
+    np_assert_equal(idx, [0, 1])
+    np_assert_allclose(vals, [1.1, 3.3])
