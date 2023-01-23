@@ -942,3 +942,7 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None):
     m = Matrix.new(tensor.dtype, *tensor.shape)
     m.build(rowidx, colidx, vals)
     return m
+
+
+def assign():
+    raise NotImplementedError()

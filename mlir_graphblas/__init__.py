@@ -7,3 +7,6 @@ from .operations import *
 from .operators import *
 from .tensor import *
 from .types import *
+
+
+__version__ = '0.0.1'
