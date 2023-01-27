@@ -1,15 +1,7 @@
 import ctypes
-import numbers
-import math
-import mlir
 import numpy as np
 from typing import Union, Optional
 from mlir import ir
-from mlir import passmanager
-from mlir import execution_engine
-from mlir import runtime
-from mlir import dialects
-
 from mlir.dialects import arith
 from mlir.dialects import bufferization
 from mlir.dialects import func
@@ -26,10 +18,11 @@ from .compiler import compile, engine_cache
 from . descriptor import Descriptor, NULL as NULL_DESC
 from .utils import get_sparse_output_pointer, get_scalar_output_pointer, renumber_indices
 from .types import RankedTensorType, BOOL, INT64, FP64
+from .exceptions import GrbIndexOutOfBounds, GrbDimensionMismatch
 
 
-# TODO: vec->matrix broadcasting as builtin param in apply_mask (rowwise/colwise)
-def apply_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL_DESC):
+# TODO: vec->matrix broadcasting as builtin param in select_by_mask (rowwise/colwise)
+def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL_DESC):
     """
     The only elements which survive in `sp` are those with corresponding elements in
     `mask` which are "truthy" (i.e. non-zero).
@@ -61,9 +54,9 @@ def apply_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL
         mask = select(SelectOp.valuene, mask, thunk=zero)
 
     # Build and compile if needed
-    key = ('apply_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
+    key = ('select_by_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
     if key not in engine_cache:
-        engine_cache[key] = _build_apply_mask(mask, sp, desc.mask_complement)
+        engine_cache[key] = _build_select_by_mask(mask, sp, desc.mask_complement)
 
     # Call the compiled function
     mem_out = get_sparse_output_pointer()
@@ -73,7 +66,7 @@ def apply_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL
                           mask.perceived_ordering, intermediate_result=True)
 
 
-def _build_apply_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool):
+def _build_select_by_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -92,7 +85,7 @@ def _build_apply_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool
             @func.FuncOp.from_py_func(rtt_mask, rtt_sp)
             def main(msk, x):
                 c = [arith.ConstantOp(index, i) for i in range(rank)]
-                dims = [tensor.DimOp(x, c[i]).result for i in mask.permutation]
+                dims = [tensor.DimOp(msk, c[i]).result for i in mask.permutation]
                 out = bufferization.AllocTensorOp(rtt_out, dims, None, None, False)
                 generic_op = linalg.GenericOp(
                     [rtt_out],
@@ -115,6 +108,109 @@ def _build_apply_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
         return compile(module)
+
+
+def select_by_indices(sp: SparseTensorBase,
+                      row_indices: Optional[list[int]] = None,
+                      col_indices: Optional[list[int]] = None,
+                      complement: bool = False):
+    """
+    Returns a new sparse tensor with the same dtype and shape as `sp`.
+
+    The only elements copied over from `sp` are those with indices found in
+    row_indices and col_indices. Vectors ignore col_indices.
+
+    If complement is True, the inverse logic is applied and indices *not*
+    found in row_indices and col_indices are copied to the output.
+
+    If row_indices is None, all rows are selected (i.e. GrB_ALL).
+    If col_indices is None, all columns are selected (i.e. GrB_ALL).
+    This allows, for example, selecting all rows for a subset of columns
+    without needing to list every possible row index.
+    """
+    if sp.ndims == 1:
+        # Vector
+        assert col_indices is None
+        if row_indices is None:
+            if complement:
+                return Vector.new(sp.dtype, *sp.shape)
+            return dup(sp)
+
+        idx, vals = sp.extract_tuples()
+        row_indices = np.array(row_indices, dtype=np.uint64)
+        selected = np.isin(idx, row_indices, invert=complement)
+        v = Vector.new(sp.dtype, *sp.shape, intermediate_result=True)
+        v.build(idx[selected], vals[selected])
+        return v
+
+    # Matrix
+    if row_indices is None and col_indices is None:
+        if complement:
+            return Matrix.new(sp.dtype, *sp.shape)
+        return dup(sp)
+
+    rowidx, colidx, vals = sp.extract_tuples()
+    if row_indices is not None:
+        row_indices = np.array(row_indices, dtype=np.uint64)
+        rowsel = np.isin(rowidx, row_indices, invert=complement)
+    if col_indices is not None:
+        col_indices = np.array(col_indices, dtype=np.uint64)
+        colsel = np.isin(colidx, col_indices, invert=complement)
+
+    if row_indices is not None and col_indices is not None:
+        sel = (rowsel | colsel) if complement else (rowsel & colsel)
+    elif row_indices is not None:
+        sel = rowsel
+    else:
+        sel = colsel
+    m = Matrix.new(sp.dtype, *sp.shape, intermediate_result=True)
+    m.build(rowidx[sel], colidx[sel], vals[sel])
+    return m
+
+
+def build_iso_vector_from_indices(dtype,
+                                  size: int,
+                                  indices: Optional[list[int]] = None,
+                                  value=1):
+    """
+    Returns a new sparse Vector of size `size` with all
+    elements in indices set to `value`.
+    """
+    v = Vector.new(dtype, size, intermediate_result=True)
+    if indices is None:
+        indices = np.arange(size)
+    if not hasattr(indices, '__len__'):
+        raise TypeError(f"indices must be a tuple/list/array, not {type(indices)}")
+    v.build(indices, value)
+    return v
+
+
+def build_iso_matrix_from_indices(dtype,
+                                  nrows: int,
+                                  ncols: int,
+                                  row_indices: Optional[list[int]] = None,
+                                  col_indices: Optional[list[int]] = None,
+                                  value=1,
+                                  *,
+                                  colwise=False):
+    """
+    Returns a new sparse Matrix of shape (nrows, ncols) with all
+    elements in (row_indices, col_indices) pairs set to `value`.
+    """
+    m = Matrix.new(dtype, nrows, ncols, intermediate_result=True)
+    if row_indices is None:
+        row_indices = np.arange(nrows)
+    if col_indices is None:
+        col_indices = np.arange(ncols)
+    if not hasattr(row_indices, '__len__'):
+        raise TypeError(f"row_indices must be a tuple/list/array, not {type(row_indices)}")
+    if not hasattr(col_indices, '__len__'):
+        raise TypeError(f"col_indices must be a tuple/list/array, not {type(col_indices)}")
+    # Build all combinations of indices
+    ridx = np.repeat(row_indices, len(col_indices))
+    cidx = np.tile(col_indices, len(row_indices))
+    m.build(ridx, cidx, value, colwise=colwise)
+    return m
 
 
 def nvals(sp: SparseTensorBase):
@@ -218,7 +314,7 @@ def ewise_add(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(op.get_output_type(left.dtype), left.shape, mem_out,
+    return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
                           left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
@@ -285,12 +381,12 @@ def ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return left.baseclass(op.get_output_type(left.dtype), left.shape, mem_out,
+    return left.baseclass(op.get_output_type(left.dtype, right.dtype), left.shape, mem_out,
                           left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
 def _build_ewise_mult(op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
-    op_result_dtype = op.get_output_type(left.dtype)
+    op_result_dtype = op.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -350,12 +446,12 @@ def mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Matrix(op.binop.get_output_type(left.dtype), [left.shape[0], right.shape[1]], mem_out,
+    return Matrix(op.binop.get_output_type(left.dtype, right.dtype), [left.shape[0], right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
 def _build_mxm(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
-    op_result_dtype = op.binop.get_output_type(left.dtype)
+    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -426,12 +522,12 @@ def mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(op.binop.get_output_type(left.dtype), [left.shape[0]], mem_out,
+    return Vector(op.binop.get_output_type(left.dtype, right.dtype), [left.shape[0]], mem_out,
                   right._sparsity, right.perceived_ordering, intermediate_result=True)
 
 
 def _build_mxv(op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
-    op_result_dtype = op.binop.get_output_type(left.dtype)
+    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -500,12 +596,12 @@ def vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
     mem_out = get_sparse_output_pointer()
     arg_pointers = [left._obj, right._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return Vector(op.binop.get_output_type(left.dtype), [right.shape[1]], mem_out,
+    return Vector(op.binop.get_output_type(left.dtype, right.dtype), [right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
 def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
-    op_result_dtype = op.binop.get_output_type(left.dtype)
+    op_result_dtype = op.binop.get_output_type(left.dtype, right.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -559,38 +655,40 @@ def _build_vxm(op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix
 
 def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
           sp: SparseTensorBase,
-          left: Optional[Scalar],
-          right: Optional[Scalar],
-          thunk: Optional[Scalar],
+          left: Optional[Scalar] = None,
+          right: Optional[Scalar] = None,
+          thunk: Optional[Scalar] = None,
           inplace: bool = False):
     rank = sp.ndims
     if rank == 0:  # Scalar
         # TODO: implement this
         raise NotImplementedError("doesn't yet work for Scalar")
 
-    # Handle case of empty tensor
-    if sp._obj is None:
-        return sp.__class__(op.get_output_type(sp.dtype), sp.shape)
+    # TODO: handle case of empty input (must figure out correct output dtype)
 
     # Build and compile if needed
     # Note that Scalars are included in the key because they are inlined in the compiled code
     optype = type(op)
     if optype is UnaryOp:
         key = ('apply_unary', op.name, *sp.get_loop_key(), inplace)
+        output_dtype = op.get_output_type(sp.dtype)
     elif optype is BinaryOp:
         if left is not None:
             key = ('apply_bind_first', op.name, *sp.get_loop_key(), left._obj, inplace)
+            output_dtype = op.get_output_type(left.dtype, sp.dtype)
         else:
             key = ('apply_bind_second', op.name, *sp.get_loop_key(), right._obj, inplace)
+            output_dtype = op.get_output_type(sp.dtype, right.dtype)
     else:
         if inplace:
             raise TypeError("apply inplace not supported for IndexUnaryOp")
         key = ('apply_indexunary', op.name, *sp.get_loop_key(), thunk._obj)
+        output_dtype = op.get_output_type(sp.dtype, thunk.dtype)
     if key not in engine_cache:
         if inplace:
             engine_cache[key] = _build_apply_inplace(op, sp, left, right)
         else:
-            engine_cache[key] = _build_apply(op, sp, left, right, thunk)
+            engine_cache[key] = _build_apply(op, sp, left, right, thunk, output_dtype)
 
     # Call the compiled function
     if inplace:
@@ -599,17 +697,17 @@ def apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
     mem_out = get_sparse_output_pointer()
     arg_pointers = [sp._obj, mem_out]
     engine_cache[key].invoke('main', *arg_pointers)
-    return sp.baseclass(op.get_output_type(sp.dtype), sp.shape, mem_out,
-                            sp._sparsity, sp.perceived_ordering, intermediate_result=True)
+    return sp.baseclass(output_dtype, sp.shape, mem_out,
+                        sp._sparsity, sp.perceived_ordering, intermediate_result=True)
 
 
 def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
                  sp: SparseTensorBase,
                  left: Optional[Scalar],
                  right: Optional[Scalar],
-                 thunk: Optional[Scalar]):
+                 thunk: Optional[Scalar],
+                 output_dtype):
     optype = type(op)
-    op_result_dtype = op.get_output_type(sp.dtype)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -617,11 +715,11 @@ def _build_apply(op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
             index = ir.IndexType.get()
             i64 = ir.IntegerType.get_signless(64)
             dtype = sp.dtype.build_mlir_type()
-            dtype_out = op_result_dtype.build_mlir_type()
+            dtype_out = output_dtype.build_mlir_type()
             perm = ir.AffineMap.get_permutation(sp.permutation)
             perm_out = ir.AffineMap.get_permutation(range(rank))
             rtt = sp.rtt.as_mlir_type()
-            rtt_out = sp.rtt.copy(dtype=op_result_dtype, ordering=sp.perceived_ordering).as_mlir_type()
+            rtt_out = sp.rtt.copy(dtype=output_dtype, ordering=sp.perceived_ordering).as_mlir_type()
 
             @func.FuncOp.from_py_func(rtt)
             def main(x):
@@ -902,7 +1000,7 @@ def _build_reduce_to_scalar(op: Monoid, sp: SparseTensorBase):
         return compile(module)
 
 
-def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=None, col_size=None):
+def extract(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size):
     # There may be a way to do this in MLIR, but for now we use numpy
     if tensor.ndims == 1:
         # Vector
@@ -910,10 +1008,10 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=No
         assert col_size is None
 
         if row_indices is None:  # None indicates GrB_ALL
-            return tensor.dup()
+            return dup(tensor)
 
         rowidx, vals = tensor.extract_tuples()
-        row_indices = np.array(row_indices)
+        row_indices = np.array(row_indices, dtype=np.uint64)
         selected = np.isin(rowidx, row_indices)
         # Filter and renumber rowidx
         rowidx, vals = rowidx[selected], vals[selected]
@@ -924,18 +1022,18 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=No
 
     # Matrix
     if row_indices is None and col_indices is None:
-        return tensor.dup()
+        return dup(tensor)
 
     rowidx, colidx, vals = tensor.extract_tuples()
     if row_indices is not None:
-        rindices_arr = np.array(row_indices)
+        rindices_arr = np.array(row_indices, dtype=np.uint64)
         rowsel = np.isin(rowidx, rindices_arr)
         # Filter and renumber rowidx
         rowidx, colidx, vals = rowidx[rowsel], colidx[rowsel], vals[rowsel]
         if type(row_indices) is not int:
             rowidx = renumber_indices(rowidx, rindices_arr)
     if col_indices is not None:
-        cindices_arr = np.array(col_indices)
+        cindices_arr = np.array(col_indices, dtype=np.uint64)
         colsel = np.isin(colidx, cindices_arr)
         # Filter and renumber colidx
         rowidx, colidx, vals = rowidx[colsel], colidx[colsel], vals[colsel]
@@ -958,5 +1056,46 @@ def extract(tensor: SparseTensorBase, row_indices, col_indices=None, row_size=No
     return m
 
 
-def assign():
-    raise NotImplementedError()
+def assign(tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size=None):
+    # There may be a way to do this in MLIR, but for now we use numpy
+    if tensor.ndims == 1:
+        # Vector input
+        if row_indices is None and col_size is None:
+            # Vector output with GrB_ALL
+            return dup(tensor)
+
+        idx, vals = tensor.extract_tuples()
+
+        if col_size is None:
+            # Vector output
+            v = Vector.new(tensor.dtype, row_size)
+            # Map idx to output indices
+            idx = np.array(row_indices, dtype=np.uint64)[idx]
+            v.build(idx, vals)
+            return v
+        # Assign Vector as row or column of Matrix
+        m = Matrix.new(tensor.dtype, row_size, col_size)
+        if type(row_indices) is int:
+            # Map idx to output cols
+            colidx = idx if col_indices is None else np.array(col_indices, dtype=np.uint64)[idx]
+            m.build([row_indices]*len(vals), colidx, vals)
+        if type(col_indices) is int:
+            # Map idx to output rows
+            rowidx = idx if row_indices is None else np.array(row_indices, dtype=np.uint64)[idx]
+            m.build(rowidx, [col_indices]*len(vals), vals)
+        return m
+
+    # Matrix input
+    if row_indices is None and col_indices is None:
+        return dup(tensor)
+
+    rowidx, colidx, vals = tensor.extract_tuples()
+
+    # Map indices to output
+    if row_indices is not None:
+        rowidx = np.array(row_indices, dtype=np.uint64)[rowidx]
+    if col_indices is not None:
+        colidx = np.array(col_indices, dtype=np.uint64)[colidx]
+    m = Matrix.new(tensor.dtype, row_size, col_size)
+    m.build(rowidx, colidx, vals)
+    return m

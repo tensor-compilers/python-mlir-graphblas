@@ -246,8 +246,8 @@ class Vector(SparseTensor):
         return f'Vector<{self.dtype.gb_name}, size={self.shape[0]}>'
 
     @classmethod
-    def new(cls, dtype, size: int):
-        return cls(dtype, (size,))
+    def new(cls, dtype, size: int, *, intermediate_result=False):
+        return cls(dtype, (size,), intermediate_result=intermediate_result)
 
     def resize(self, size: int):
         raise NotImplementedError()
@@ -271,6 +271,7 @@ class Vector(SparseTensor):
 
         indices: list or numpy array of int
         values: list or numpy array with matching dtype as declared in `.new()`
+                can also be a scalar value to make the Vector iso-valued
         dup: BinaryOp used to combined entries with the same index
              NOTE: this is currently not support; passing dup will raise an error
         sparsity: list of string or DimLevelType
@@ -287,7 +288,17 @@ class Vector(SparseTensor):
         if not isinstance(indices, np.ndarray):
             indices = np.array(indices, dtype=np.uint64)
         if not isinstance(values, np.ndarray):
-            values = np.array(values, dtype=self.dtype.np_type)
+            if hasattr(values, '__len__'):
+                values = np.array(values, dtype=self.dtype.np_type)
+            else:
+                if type(values) is Scalar:
+                    if values.dtype != self.dtype:
+                        raise TypeError("Scalar value must have same dtype as Vector")
+                    if values.nvals() == 0:
+                        # Empty Scalar means nothing to build
+                        return
+                    values = values.extract_element()
+                values = np.ones(indices.shape, dtype=self.dtype.np_type) * values
         if sparsity is None:
             sparsity = [DimLevelType.compressed]
         self._to_sparse_tensor(indices, values, sparsity=sparsity, ordering=[0])
@@ -329,8 +340,8 @@ class Matrix(SparseTensor):
         return tuple(self._ordering) != self.permutation
 
     @classmethod
-    def new(cls, dtype, nrows: int, ncols: int):
-        return cls(dtype, (nrows, ncols))
+    def new(cls, dtype, nrows: int, ncols: int, *, intermediate_result=False):
+        return cls(dtype, (nrows, ncols), intermediate_result=intermediate_result)
 
     def diag(self, k: int):
         raise NotImplementedError()
@@ -356,13 +367,15 @@ class Matrix(SparseTensor):
 
         return nvals(self)
 
-    def build(self, row_indices, col_indices, values, *, dup=None, sparsity=None, colwise=False):
+    def build(self, row_indices, col_indices, values, *,
+              dup=None, sparsity=None, colwise=False):
         """
         Build the underlying MLIRSparseTensor structure from COO.
 
         row_indices: list or numpy array of int
         col_indices: list or numpy array of int
         values: list or numpy array with matching dtype as declared in `.new()`
+                can also be a scalar value to make the Vector iso-valued
         dup: BinaryOp used to combined entries with the same (row, col) coordinate
              NOTE: this is currently not support; passing dup will raise an error
         sparsity: list of string or DimLevelType
@@ -383,7 +396,17 @@ class Matrix(SparseTensor):
             col_indices = np.array(col_indices, dtype=np.uint64)
         indices = np.stack([row_indices, col_indices], axis=1)
         if not isinstance(values, np.ndarray):
-            values = np.array(values, dtype=self.dtype.np_type)
+            if hasattr(values, '__len__'):
+                values = np.array(values, dtype=self.dtype.np_type)
+            else:
+                if type(values) is Scalar:
+                    if values.dtype != self.dtype:
+                        raise TypeError("Scalar value must have same dtype as Matrix")
+                    if values.nvals() == 0:
+                        # Empty Scalar means nothing to build
+                        return
+                    values = values.extract_element()
+                values = np.ones(indices.shape, dtype=self.dtype.np_type) * values
         ordering = [1, 0] if colwise else [0, 1]
         if sparsity is None:
             sparsity = [DimLevelType.dense, DimLevelType.compressed]
