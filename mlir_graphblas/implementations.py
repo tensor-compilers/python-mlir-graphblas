@@ -358,7 +358,6 @@ def _build_scalar_binop(out_type: DType, op: BinaryOp, left: Scalar, right: Scal
 
 def ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
     assert left.ndims == right.ndims
-    assert left.dtype == right.dtype
 
     if left._obj is None:
         if right.dtype == out_type:
