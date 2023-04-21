@@ -1,5 +1,6 @@
-import ctypes
 import numpy as np
+import ctypes
+from ctypes.util import find_library
 from enum import Enum
 from mlir import ir
 from mlir.dialects.sparse_tensor import DimLevelType
@@ -8,13 +9,9 @@ from .exceptions import (
     GrbDimensionMismatch, GrbOutputNotEmpty, GrbIndexOutOfBounds, GrbEmptyObject
 )
 
-
+MLIR_C_RUNNER_UTILS = find_library("mlir_c_runner_utils")
+c_lib = ctypes.CDLL(MLIR_C_RUNNER_UTILS)
 LLVMPTR = ctypes.POINTER(ctypes.c_char)
-# TODO: fix this once a proper package exists
-import os
-LIBMLIR_C_RUNNER_UTILS = f"{os.environ['LLVM_BUILD_DIR']}/lib/libmlir_c_runner_utils.dylib"
-
-c_lib = ctypes.CDLL(LIBMLIR_C_RUNNER_UTILS)
 
 
 def get_sparse_output_pointer():

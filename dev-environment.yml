@@ -1,0 +1,12 @@
+# To use:
+#   $ conda env create -f dev-environment.yml
+#   $ conda activate mlir-graphblas-dev
+
+name: mlir-graphblas-dev
+channels:
+    - conda-forge
+    - nodefaults  # Only from conda-forge for faster solving
+dependencies:
+    - python
+    - mlir-python-bindings >=16.0
+    - pytest
