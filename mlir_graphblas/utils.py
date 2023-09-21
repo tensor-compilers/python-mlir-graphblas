@@ -1,3 +1,4 @@
+import os
 import numpy as np
 import ctypes
 from ctypes.util import find_library
@@ -9,7 +10,7 @@ from .exceptions import (
     GrbDimensionMismatch, GrbOutputNotEmpty, GrbIndexOutOfBounds, GrbEmptyObject
 )
 
-MLIR_C_RUNNER_UTILS = find_library("mlir_c_runner_utils")
+MLIR_C_RUNNER_UTILS = os.environ['SUPPORTLIB']
 c_lib = ctypes.CDLL(MLIR_C_RUNNER_UTILS)
 LLVMPTR = ctypes.POINTER(ctypes.c_char)
 

@@ -384,9 +384,13 @@ def ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: Spar
         engine_cache[key] = _build_ewise_add(out_type, op, left, right)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [left._obj, right._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    # mem_out = get_sparse_output_pointer()
+    # arg_pointers = [left._obj, right._obj, mem_out]
+    input_pointers = [left._obj, right._obj]
+    # engine_cache[key].invoke('main', *arg_pointers)
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
     return left.baseclass(out_type, left.shape, mem_out,
                           determine_sparsity(left, right, union=True), left.perceived_ordering,
                           intermediate_result=True)
