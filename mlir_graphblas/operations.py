@@ -27,7 +27,8 @@ def update(output: SparseObject,
            desc: Descriptor = NULL_DESC,
            *,
            row_indices: Optional[list[int]] = None,
-           col_indices: Optional[list[int]] = None):
+           col_indices: Optional[list[int]] = None,
+           **kwargs):
     """
     This function assumes that if a mask is supplied, it has already been applied to `tensor`
 
@@ -61,7 +62,7 @@ def update(output: SparseObject,
         if accum is None or output._obj is None:
             output.set_element(tensor.extract_element())
         else:
-            output._obj = impl.ewise_add(output.dtype, accum, output, tensor)._obj
+            output._obj = impl.ewise_add(output.dtype, accum, output, tensor, **kwargs)._obj
         return
 
     if not isinstance(output, SparseTensor):
@@ -79,16 +80,16 @@ def update(output: SparseObject,
                 result = tensor
             else:  # mask=Y, accum=N, replace=N
                 # Apply inverted mask, then eWiseAdd
-                output._replace(impl.select_by_mask(output, mask, desc_inverted))
-                result = impl.ewise_add(output.dtype, BinaryOp.oneb, output, tensor)
+                output._replace(impl.select_by_mask(output, mask, desc_inverted, **kwargs))
+                result = impl.ewise_add(output.dtype, BinaryOp.oneb, output, tensor, **kwargs)
         else:
             if mask is None:  # mask=N, accum=N, replace=?, w/ indices
                 # Drop indices in output, then eWiseAdd
-                output._replace(impl.select_by_indices(output, row_indices, col_indices, complement=True))
+                output._replace(impl.select_by_indices(output, row_indices, col_indices, complement=True, **kwargs))
             elif desc.replace:  # mask=Y, accum=N, replace=Y, w/ indices
                 # Apply mask to output, drop row/col indices from output, then eWiseAdd
-                output._replace(impl.select_by_mask(output, mask, desc))
-                output._replace(impl.select_by_indices(output, row_indices, col_indices, complement=True))
+                output._replace(impl.select_by_mask(output, mask, desc, kwargs=kwargs))
+                output._replace(impl.select_by_indices(output, row_indices, col_indices, complement=True, **kwargs))
             else:  # mask=Y, accum=N, replace=N, w/ indices
                 if desc.mask_complement:
                     # Need to select the row/col indices that aren't in the mask,
@@ -100,28 +101,28 @@ def update(output: SparseObject,
                         all_indices = impl.build_iso_vector_from_indices(BOOL, *output.shape, row_indices)
                     else:
                         all_indices = impl.build_iso_matrix_from_indices(BOOL, *output.shape, row_indices, col_indices)
-                    new_mask = impl.select_by_mask(all_indices, mask, desc)
-                    output._replace(impl.select_by_mask(output, new_mask, desc))
+                    new_mask = impl.select_by_mask(all_indices, mask, desc, **kwargs)
+                    output._replace(impl.select_by_mask(output, new_mask, desc, **kwargs))
                 else:
                     # Select the row/col indices in the mask, apply it inverted to the output, then eWiseAdd
-                    new_mask = impl.select_by_indices(mask, row_indices, col_indices)
-                    output._replace(impl.select_by_mask(output, new_mask, desc_inverted))
-            result = impl.ewise_add(output.dtype, BinaryOp.oneb, output, tensor)
+                    new_mask = impl.select_by_indices(mask, row_indices, col_indices, **kwargs)
+                    output._replace(impl.select_by_mask(output, new_mask, desc_inverted, **kwargs))
+            result = impl.ewise_add(output.dtype, BinaryOp.oneb, output, tensor, **kwargs)
     elif mask is None or not desc.replace:
         # eWiseAdd using accum
-        result = impl.ewise_add(output.dtype, accum, output, tensor)
+        print("running ewise_add using accum in update()")
+        result = impl.ewise_add(output.dtype, accum, output, tensor, **kwargs)
     else:
         # Mask the output, then perform eWiseAdd using accum
-        output._replace(impl.select_by_mask(output, mask, desc))
-        result = impl.ewise_add(output.dtype, accum, output, tensor)
-
+        output._replace(impl.select_by_mask(output, mask, desc, **kwargs))
+        result = impl.ewise_add(output.dtype, accum, output, tensor, **kwargs)
     if result is output:
         # This can happen if empty tensors are used as input
         return output
 
     # If not an intermediate result or wrong dtype, make a copy
     if not result._intermediate_result or result.dtype != output.dtype:
-        result = impl.dup(output.dtype, result)
+        result = impl.dup(output.dtype, result, **kwargs)
 
     output._replace(result)
 
@@ -131,7 +132,8 @@ def transpose(out: Matrix,
               *,
               mask: Optional[SparseTensor] = None,
               accum: Optional[BinaryOp] = None,
-              desc: Descriptor = NULL_DESC):
+              desc: Descriptor = NULL_DESC,
+              **kwargs):
     # Apply descriptor transpose
     if tensor.ndims != 2:
         raise TypeError(f"transpose requires Matrix, not {type(tensor)}")
@@ -146,10 +148,9 @@ def transpose(out: Matrix,
     result = TransposedMatrix.wrap(tensor)
 
     if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
+        result = impl.select_by_mask(result, mask, desc, **kwargs)
 
     update(out, result, mask, accum, desc)
-
 
 def ewise_add(out: SparseTensor,
               op: BinaryOp,
@@ -158,7 +159,8 @@ def ewise_add(out: SparseTensor,
               *,
               mask: Optional[SparseTensor] = None,
               accum: Optional[BinaryOp] = None,
-              desc: Descriptor = NULL_DESC):
+              desc: Descriptor = NULL_DESC,
+              **kwargs):
     # Normalize op
     if type(op) is Semiring:
         op = op.monoid
@@ -180,11 +182,11 @@ def ewise_add(out: SparseTensor,
         raise GrbDimensionMismatch(f"output shape mismatch: {out.shape} != {left.shape}")
 
     if mask is not None:
-        left = impl.select_by_mask(left, mask, desc)
-        right = impl.select_by_mask(right, mask, desc)
+        left = impl.select_by_mask(left, mask, desc, **kwargs)
+        right = impl.select_by_mask(right, mask, desc, **kwargs)
 
-    result = impl.ewise_add(out.dtype, op, left, right)
-    update(out, result, mask, accum, desc)
+    result = impl.ewise_add(out.dtype, op, left, right, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def ewise_mult(out: SparseTensor,
@@ -194,7 +196,8 @@ def ewise_mult(out: SparseTensor,
                *,
                mask: Optional[SparseTensor] = None,
                accum: Optional[BinaryOp] = None,
-               desc: Descriptor = NULL_DESC):
+               desc: Descriptor = NULL_DESC,
+               **kwargs):
     # Normalize op
     if type(op) is not BinaryOp:
         if hasattr(op, 'binop'):
@@ -216,10 +219,10 @@ def ewise_mult(out: SparseTensor,
 
     if mask is not None:
         # Only need to apply mask to one of the inputs
-        left = impl.select_by_mask(left, mask, desc)
+        left = impl.select_by_mask(left, mask, desc, **kwargs)
 
-    result = impl.ewise_mult(out.dtype, op, left, right)
-    update(out, result, mask, accum, desc)
+    result = impl.ewise_mult(out.dtype, op, left, right, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def mxm(out: Matrix,
@@ -229,7 +232,8 @@ def mxm(out: Matrix,
         *,
         mask: Optional[SparseTensor] = None,
         accum: Optional[BinaryOp] = None,
-        desc: Descriptor = NULL_DESC):
+        desc: Descriptor = NULL_DESC,
+        **kwargs):
     # Verify op
     if type(op) is not Semiring:
         raise TypeError(f"op must be Semiring, not {type(op)}")
@@ -259,11 +263,10 @@ def mxm(out: Matrix,
         right = impl.flip_layout(right)
 
     # TODO: apply the mask during the computation, not at the end
-    result = impl.mxm(out.dtype, op, left, right)
+    result = impl.mxm(out.dtype, op, left, right, **kwargs)
     if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc)
-
+        result = impl.select_by_mask(result, mask, desc, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 def mxv(out: Vector,
         op: Semiring,
@@ -272,7 +275,8 @@ def mxv(out: Vector,
         *,
         mask: Optional[SparseTensor] = None,
         accum: Optional[BinaryOp] = None,
-        desc: Descriptor = NULL_DESC):
+        desc: Descriptor = NULL_DESC,
+        **kwargs):
     # Verify op
     if type(op) is not Semiring:
         raise TypeError(f"op must be Semiring, not {type(op)}")
@@ -292,10 +296,10 @@ def mxv(out: Vector,
         raise GrbDimensionMismatch(f"output size should be {left.shape[0]} not {out.shape[0]}")
 
     # TODO: apply the mask during the computation, not at the end
-    result = impl.mxv(out.dtype, op, left, right)
+    result = impl.mxv(out.dtype, op, left, right, **kwargs)
     if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc)
+        result = impl.select_by_mask(result, mask, desc, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def vxm(out: Vector,
@@ -305,7 +309,8 @@ def vxm(out: Vector,
         *,
         mask: Optional[SparseTensor] = None,
         accum: Optional[BinaryOp] = None,
-        desc: Descriptor = NULL_DESC):
+        desc: Descriptor = NULL_DESC,
+        **kwargs):
     # Verify op
     if type(op) is not Semiring:
         raise TypeError(f"op must be Semiring, not {type(op)}")
@@ -325,10 +330,12 @@ def vxm(out: Vector,
         raise GrbDimensionMismatch(f"output size should be {right.shape[1]} not {out.shape[0]}")
 
     # TODO: apply the mask during the computation, not at the end
-    result = impl.vxm(out.dtype, op, left, right)
+    result = impl.vxm(out.dtype, op, left, right, **kwargs)
     if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc)
+        result = impl.select_by_mask(result, mask, desc, **kwargs)
+    if "index_instance" in kwargs:
+        kwargs["index_instance"] += 1
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def apply(out: SparseTensor,
@@ -340,7 +347,8 @@ def apply(out: SparseTensor,
           thunk: Optional[Scalar] = None,
           mask: Optional[SparseTensor] = None,
           accum: Optional[BinaryOp] = None,
-          desc: Descriptor = NULL_DESC):
+          desc: Descriptor = NULL_DESC,
+          **kwargs):
     # Validate op and required scalars
     optype = type(op)
     if optype is UnaryOp:
@@ -374,7 +382,7 @@ def apply(out: SparseTensor,
         raise GrbDimensionMismatch(f"output shape must match input shape: {out.shape} != {tensor.shape}")
 
     if mask is not None:
-        tensor = impl.select_by_mask(tensor, mask, desc)
+        tensor = impl.select_by_mask(tensor, mask, desc, **kwargs)
 
     # Check for inplace apply (out == tensor, Unary/Binary, no masks, no accum, etc)
     if (
@@ -385,10 +393,10 @@ def apply(out: SparseTensor,
             and desc is NULL_DESC
             and not tensor._intermediate_result
     ):
-        impl.apply(out.dtype, op, tensor, left, right, None, inplace=True)
+        impl.apply(out.dtype, op, tensor, left, right, None, inplace=True, **kwargs)
     else:
-        result = impl.apply(out.dtype, op, tensor, left, right, thunk)
-        update(out, result, mask, accum, desc)
+        result = impl.apply(out.dtype, op, tensor, left, right, thunk, **kwargs)
+        update(out, result, mask, accum, desc, **kwargs)
 
 
 def select(out: SparseTensor,
@@ -398,7 +406,8 @@ def select(out: SparseTensor,
            *,
            mask: Optional[SparseTensor] = None,
            accum: Optional[BinaryOp] = None,
-           desc: Descriptor = NULL_DESC):
+           desc: Descriptor = NULL_DESC,
+           **kwargs):
     # Verify op
     if type(op) is not SelectOp:
         raise TypeError(f"op must be SelectOp, not {type(op)}")
@@ -416,10 +425,10 @@ def select(out: SparseTensor,
         raise GrbDimensionMismatch(f"output shape must match input shape: {out.shape} != {tensor.shape}")
 
     if mask is not None:
-        tensor = impl.select_by_mask(tensor, mask, desc)
+        tensor = impl.select_by_mask(tensor, mask, desc, **kwargs)
 
-    result = impl.select(out.dtype, op, tensor, thunk)
-    update(out, result, mask, accum, desc)
+    result = impl.select(out.dtype, op, tensor, thunk, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def reduce_to_vector(out: Vector,
@@ -428,7 +437,8 @@ def reduce_to_vector(out: Vector,
                      *,
                      mask: Optional[Vector] = None,
                      accum: Optional[BinaryOp] = None,
-                     desc: Descriptor = NULL_DESC):
+                     desc: Descriptor = NULL_DESC,
+                     **kwargs):
     # Verify op
     if type(op) is not Monoid:
         raise TypeError(f"op must be Monoid, not {type(op)}")
@@ -446,10 +456,10 @@ def reduce_to_vector(out: Vector,
         raise GrbDimensionMismatch(f"output size should be {tensor.shape[0]} not {out.shape[0]}")
 
     # TODO: apply the mask during the computation, not at the end
-    result = impl.reduce_to_vector(out.dtype, op, tensor)
+    result = impl.reduce_to_vector(out.dtype, op, tensor, **kwargs)
     if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc)
+        result = impl.select_by_mask(result, mask, desc, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def reduce_to_scalar(out: Scalar,
@@ -457,7 +467,8 @@ def reduce_to_scalar(out: Scalar,
                      tensor: SparseTensor,
                      *,
                      accum: Optional[BinaryOp] = None,
-                     desc: Descriptor = NULL_DESC):
+                     desc: Descriptor = NULL_DESC,
+                     **kwargs):
     # Verify op
     if type(op) is not Monoid:
         raise TypeError(f"op must be Monoid, not {type(op)}")
@@ -466,8 +477,8 @@ def reduce_to_scalar(out: Scalar,
     if out.ndims != 0:
         raise GrbDimensionMismatch("reduce_to_scalar requires scalar output")
 
-    result = impl.reduce_to_scalar(out.dtype, op, tensor)
-    update(out, result, accum=accum, desc=desc)
+    result = impl.reduce_to_scalar(out.dtype, op, tensor, **kwargs)
+    update(out, result, accum=accum, desc=desc, **kwargs)
 
 
 def extract(out: SparseTensor,
@@ -477,7 +488,8 @@ def extract(out: SparseTensor,
             *,
             mask: Optional[Vector] = None,
             accum: Optional[BinaryOp] = None,
-            desc: Descriptor = NULL_DESC):
+            desc: Descriptor = NULL_DESC,
+            **kwargs):
     """
     Setting row_indices or col_indices to `None` is the equivalent of GrB_ALL
     """
@@ -527,8 +539,8 @@ def extract(out: SparseTensor,
 
     result = impl.extract(out.dtype, tensor, row_indices, col_indices, row_size, col_size)
     if mask is not None:
-        result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc)
+        result = impl.select_by_mask(result, mask, desc, **kwargs)
+    update(out, result, mask, accum, desc, **kwargs)
 
 
 def assign(out: SparseTensor,
@@ -538,7 +550,8 @@ def assign(out: SparseTensor,
            *,
            mask: Optional[Vector] = None,
            accum: Optional[BinaryOp] = None,
-           desc: Descriptor = NULL_DESC):
+           desc: Descriptor = NULL_DESC,
+           **kwargs):
     """
     Setting row_indices or col_indices to `None` is the equivalent of GrB_ALL
     """
@@ -587,14 +600,14 @@ def assign(out: SparseTensor,
             if mask is None:
                 raise GrbError("This will create a dense matrix. Please provide a mask or indices.")
             # Use mask to build an iso-valued Matrix
-            result = impl.apply(out.dtype, BinaryOp.second, mask, right=tensor)
+            result = impl.apply(out.dtype, BinaryOp.second, mask, right=tensor, **kwargs)
         else:
             if out.ndims == 1:  # Vector output
                 result = impl.build_iso_vector_from_indices(out.dtype, *out.shape, row_indices, tensor)
             else:  # Matrix output
                 result = impl.build_iso_matrix_from_indices(out.dtype, *out.shape, row_indices, col_indices, tensor, colwise=out.is_colwise())
             if mask is not None:
-                result = impl.select_by_mask(result, mask, desc)
+                result = impl.select_by_mask(result, mask, desc, **kwargs)
     else:  # Vector/Matrix input
         # Verify expected input shape
         if out.ndims == 1:  # Vector output
@@ -609,7 +622,7 @@ def assign(out: SparseTensor,
         if tensor.shape != expected_input_shape:
             raise GrbDimensionMismatch(f"input shape mismatch: {tensor.shape} != {expected_input_shape}")
 
-        result = impl.assign(out.dtype, tensor, row_indices, col_indices, *out.shape)
+        result = impl.assign(out.dtype, tensor, row_indices, col_indices, *out.shape, **kwargs)
         if mask is not None:
-            result = impl.select_by_mask(result, mask, desc)
-    update(out, result, mask, accum, desc, row_indices=row_indices, col_indices=col_indices)
+            result = impl.select_by_mask(result, mask, desc, **kwargs)
+    update(out, result, mask, accum, desc, row_indices=row_indices, col_indices=col_indices, **kwargs)

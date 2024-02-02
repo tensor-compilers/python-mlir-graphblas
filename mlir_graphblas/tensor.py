@@ -70,11 +70,11 @@ class SparseTensorBase(SparseObject):
         self._rtt = None
         self._intermediate_result = intermediate_result
 
-    def dup(self):
+    def dup(self, **kwargs):
         f"""Returns a copy of the {self.baseclass}"""
         from . import implementations as impl
 
-        return impl.dup(self.dtype, self, intermediate=False)
+        return impl.dup(self.dtype, self, intermediate=False, kwargs=kwargs)
 
     @property
     def rtt(self):
@@ -226,13 +226,13 @@ class Scalar(SparseObject):
     def clear(self):
         self._obj = None
 
-    def dup(self):
+    def dup(self, **kwargs):
         # Don't pass value to `new` to avoid `set_element` logic
         s = Scalar.new(self.dtype)
         s._obj = self._obj
         return s
 
-    def nvals(self):
+    def nvals(self, **kwargs):
         if self._obj is None:
             return 0
         return 1
@@ -270,13 +270,13 @@ class Vector(SparseTensor):
             return self.shape[0]
         return c_lib.sparseDimSize(self._obj[0], 0)
 
-    def nvals(self):
+    def nvals(self, **kwargs):
         if self._obj is None:
             return 0
 
         from . import implementations as impl
 
-        return impl.nvals(self)
+        return impl.nvals(self, kwargs=kwargs)
 
     def build(self, indices, values, *, dup=None, sparsity=None):
         """
@@ -372,13 +372,13 @@ class Matrix(SparseTensor):
             return self.shape[1]
         return c_lib.sparseDimSize(self._obj[0], self._ordering[1])
 
-    def nvals(self):
+    def nvals(self, **kwargs):
         if self._obj is None:
             return 0
 
         from .implementations import nvals
 
-        return nvals(self)
+        return nvals(self, **kwargs)
 
     def build(self, row_indices, col_indices, values, *,
               dup=None, sparsity=None, colwise=False):

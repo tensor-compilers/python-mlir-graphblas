@@ -130,7 +130,7 @@ class RankedTensorType:
         dim_ordering = ir.AffineMap.get_permutation(self.ordering)
         pointer_bit_width = index_bit_width = 0
         sp_encoding = sparse_tensor.EncodingAttr.get(
-            self.sparsity, dim_ordering, None, pointer_bit_width, index_bit_width
+            self.sparsity, dim_ordering, pointer_bit_width, index_bit_width 
         )
         return ir.RankedTensorType.get(sizes, self.dtype.build_mlir_type(), sp_encoding)
 

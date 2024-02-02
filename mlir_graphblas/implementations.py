@@ -23,7 +23,7 @@ from .exceptions import GrbError, GrbIndexOutOfBounds, GrbDimensionMismatch
 
 
 # TODO: vec->matrix broadcasting as builtin param in select_by_mask (rowwise/colwise)
-def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL_DESC):
+def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = NULL_DESC, **kwargs):
     """
     The only elements which survive in `sp` are those with corresponding elements in
     `mask` which are "truthy" (i.e. non-zero).
@@ -55,17 +55,18 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
     # Build and compile if needed
     key = ('select_by_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
     if key not in engine_cache:
-        engine_cache[key] = _build_select_by_mask(mask, sp, desc.mask_complement)
+        engine_cache[key] = _build_select_by_mask(mask, sp, desc.mask_complement, **kwargs)
+
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [mask._obj, sp._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [mask._obj.contents, mask._obj.contents]
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
     return mask.baseclass(sp.dtype, mask.shape, mem_out, determine_sparsity(mask, sp),
                           mask.perceived_ordering, intermediate_result=True)
 
-
-def _build_select_by_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool):
+def _build_select_by_mask(mask: SparseTensor, sp: SparseTensorBase, complement: bool, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -107,13 +108,14 @@ def _build_select_by_mask(mask: SparseTensor, sp: SparseTensorBase, complement: 
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 def select_by_indices(sp: SparseTensorBase,
                       row_indices: Optional[list[int]] = None,
                       col_indices: Optional[list[int]] = None,
-                      complement: bool = False):
+                      complement: bool = False,
+                      **kwargs):
     """
     Returns a new sparse tensor with the same dtype and shape as `sp`.
 
@@ -134,20 +136,20 @@ def select_by_indices(sp: SparseTensorBase,
         if row_indices is None:
             if complement:
                 return Vector.new(sp.dtype, *sp.shape)
-            return dup(sp.dtype, sp)
+            return dup(sp.dtype, sp, **kwargs)
 
         idx, vals = sp.extract_tuples()
         row_indices = np.array(row_indices, dtype=np.uint64)
         selected = np.isin(idx, row_indices, invert=complement)
         v = Vector.new(sp.dtype, *sp.shape, intermediate_result=True)
-        v.build(idx[selected], vals[selected])
+        v.build(idx[selected], vals[selected], )
         return v
 
     # Matrix
     if row_indices is None and col_indices is None:
         if complement:
             return Matrix.new(sp.dtype, *sp.shape)
-        return dup(sp.dtype, sp)
+        return dup(sp.dtype, sp, **kwargs)
 
     rowidx, colidx, vals = sp.extract_tuples()
     if row_indices is not None:
@@ -167,11 +169,11 @@ def select_by_indices(sp: SparseTensorBase,
     m.build(rowidx[sel], colidx[sel], vals[sel])
     return m
 
-
 def build_iso_vector_from_indices(dtype,
                                   size: int,
                                   indices: Optional[list[int]] = None,
-                                  value=1):
+                                  value=1,
+                                  **kwargs):
     """
     Returns a new sparse Vector of size `size` with all
     elements in indices set to `value`.
@@ -184,7 +186,6 @@ def build_iso_vector_from_indices(dtype,
     v.build(indices, value)
     return v
 
-
 def build_iso_matrix_from_indices(dtype,
                                   nrows: int,
                                   ncols: int,
@@ -192,7 +193,8 @@ def build_iso_matrix_from_indices(dtype,
                                   col_indices: Optional[list[int]] = None,
                                   value=1,
                                   *,
-                                  colwise=False):
+                                  colwise=False,
+                                  **kwargs):
     """
     Returns a new sparse Matrix of shape (nrows, ncols) with all
     elements in (row_indices, col_indices) pairs set to `value`.
@@ -212,21 +214,19 @@ def build_iso_matrix_from_indices(dtype,
     m.build(ridx, cidx, value, colwise=colwise)
     return m
 
-
-def nvals(sp: SparseTensorBase):
+def nvals(sp: SparseTensorBase, **kwargs):
     # Build and compile if needed
     key = ('nvals', *sp.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_nvals(sp)
+        engine_cache[key] = _build_nvals(sp,**kwargs)
 
-    # Call the compiled function
-    mem_out = ctypes.pointer(ctypes.c_long(0))
-    arg_pointers = [sp._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
-    return mem_out.contents.value
+    # # Call the compiled function
+    input_pointers = [sp._obj.contents]
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    return mem_out
 
-
-def _build_nvals(sp: SparseTensorBase):
+def _build_nvals(sp: SparseTensorBase, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -238,10 +238,9 @@ def _build_nvals(sp: SparseTensorBase):
                 return arith.IndexCastOp(INT64.build_mlir_type(), nvals)
 
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
-        return compile(module)
+        return compile(module, **kwargs)
 
-
-def dup(out_type: DType, sp: SparseTensorBase, intermediate: bool = True):
+def dup(out_type: DType, sp: SparseTensorBase, intermediate: bool = True, **kwargs):
     if sp._obj is None:
         return sp.baseclass(out_type, sp.shape, intermediate_result=intermediate)
 
@@ -251,17 +250,18 @@ def dup(out_type: DType, sp: SparseTensorBase, intermediate: bool = True):
     # Build and compile if needed
     key = ('dup', out_type, *sp.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_dup(out_type, sp)
+        engine_cache[key] = _build_dup(out_type, sp, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [sp._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [sp._obj.contents]
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
     return sp.baseclass(out_type, sp.shape, mem_out, sp._sparsity,
                         sp.perceived_ordering, intermediate_result=intermediate)
 
-
-def _build_dup(out_type: DType, sp: SparseTensorBase):
+def _build_dup(out_type: DType, sp: SparseTensorBase, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -295,10 +295,10 @@ def _build_dup(out_type: DType, sp: SparseTensorBase):
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
-def flip_layout(m: Union[Matrix, TransposedMatrix]):
+def flip_layout(m: Union[Matrix, TransposedMatrix], **kwargs):
     if m._obj is None:
         return m
 
@@ -309,12 +309,14 @@ def flip_layout(m: Union[Matrix, TransposedMatrix]):
     # Build and compile if needed
     key = ('flip_layout', *m.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_flip_layout(m)
+        engine_cache[key] = _build_flip_layout(m, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [m._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [m._obj.contents]
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
 
     flipped = Matrix(m.dtype, m.shape, mem_out, m._sparsity,
                      list(reversed(m._ordering)), intermediate_result=True)
@@ -323,7 +325,7 @@ def flip_layout(m: Union[Matrix, TransposedMatrix]):
     return flipped
 
 
-def _build_flip_layout(m: Union[Matrix, TransposedMatrix]):
+def _build_flip_layout(m: Union[Matrix, TransposedMatrix], **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -336,10 +338,10 @@ def _build_flip_layout(m: Union[Matrix, TransposedMatrix]):
                 return sparse_tensor.ConvertOp(rtt_out, x)
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
-def _build_scalar_binop(out_type: DType, op: BinaryOp, left: Scalar, right: Scalar):
+def _build_scalar_binop(out_type: DType, op: BinaryOp, left: Scalar, right: Scalar, **kwargs):
     # Both scalars are non-empty
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
@@ -353,10 +355,9 @@ def _build_scalar_binop(out_type: DType, op: BinaryOp, left: Scalar, right: Scal
                 return result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
-
-def ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase, **kwargs):
     assert left.ndims == right.ndims
 
     if left._obj is None:
@@ -372,31 +373,29 @@ def ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: Spar
     if rank == 0:  # Scalar
         key = ('scalar_binop', op.name, out_type, left.dtype, right.dtype)
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_binop(out_type, op, left, right)
-        mem_out = get_scalar_output_pointer(left.dtype)
-        arg_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right), mem_out]
-        engine_cache[key].invoke('main', *arg_pointers)
-        return Scalar(out_type, (), out_type.np_type(mem_out.contents.value))
+            engine_cache[key] = _build_scalar_binop(out_type, op, left, right, **kwargs)
+        input_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right)]
+        func = getattr(engine_cache[key], "mymain")
+        mem_out = func(*input_pointers)
+        return Scalar(out_type, (), out_type.np_type(mem_out))
+
 
     # Build and compile if needed
     key = ('ewise_add', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_ewise_add(out_type, op, left, right)
+        engine_cache[key] = _build_ewise_add(out_type, op, left, right, **kwargs)
 
     # Call the compiled function
-    # mem_out = get_sparse_output_pointer()
-    # arg_pointers = [left._obj, right._obj, mem_out]
-    input_pointers = [left._obj, right._obj]
-    # engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [left._obj.contents, right._obj.contents]
 
     func = getattr(engine_cache[key], "mymain")
     mem_out = func(*input_pointers)
-    return left.baseclass(out_type, left.shape, mem_out,
+    mem_out = ctypes.pointer(mem_out)
+    return left.baseclass(out_type, left.shape, mem_out, 
                           determine_sparsity(left, right, union=True), left.perceived_ordering,
                           intermediate_result=True)
 
-
-def _build_ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def _build_ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -449,10 +448,10 @@ def _build_ewise_add(out_type: DType, op: BinaryOp, left: SparseTensorBase, righ
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
-def ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase, **kwargs):
     assert left.ndims == right.ndims
 
     if left._obj is None or right._obj is None:
@@ -462,27 +461,30 @@ def ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: Spa
     if rank == 0:  # Scalar
         key = ('scalar_binop', op.name, out_type, left.dtype, right.dtype)
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_binop(out_type, op, left, right)
-        mem_out = get_scalar_output_pointer(out_type)
-        arg_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right), mem_out]
-        engine_cache[key].invoke('main', *arg_pointers)
+            engine_cache[key] = _build_scalar_binop(out_type, op, left, right, **kwargs)
+        input_pointers = [get_scalar_input_arg(left), get_scalar_input_arg(right)]
+        func = getattr(engine_cache[key], "mymain")
+        mem_out = func(*input_pointers)
         return Scalar(out_type, (), out_type.np_type(mem_out.contents.value))
 
     # Build and compile if needed
     key = ('ewise_mult', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_ewise_mult(out_type, op, left, right)
+        engine_cache[key] = _build_ewise_mult(out_type, op, left, right, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [left._obj, right._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [left._obj.contents, right._obj.contents]
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
+    
     return left.baseclass(out_type, left.shape, mem_out,
                           determine_sparsity(left, right), left.perceived_ordering,
                           intermediate_result=True)
 
 
-def _build_ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase):
+def _build_ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, right: SparseTensorBase, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -525,11 +527,11 @@ def _build_ewise_mult(out_type: DType, op: BinaryOp, left: SparseTensorBase, rig
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 # TODO: pass the mask to mxm
-def mxm(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix]):
+def mxm(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Union[Matrix, TransposedMatrix], **kwargs):
     assert left.ndims == right.ndims == 2
 
     if left._obj is None or right._obj is None:
@@ -538,12 +540,14 @@ def mxm(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], ri
     # Build and compile if needed
     key = ('mxm', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_mxm(out_type, op, left, right)
+        engine_cache[key] = _build_mxm(out_type, op, left, right, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [left._obj, right._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [left._obj.contents, right._obj.contents]
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
     return Matrix(out_type, [left.shape[0], right.shape[1]], mem_out,
                   determine_sparsity(left, right), left.perceived_ordering, intermediate_result=True)
 
@@ -551,7 +555,8 @@ def mxm(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], ri
 def _build_mxm(out_type: DType,
                op: Semiring,
                left: Union[Matrix, TransposedMatrix],
-               right: Union[Matrix, TransposedMatrix]):
+               right: Union[Matrix, TransposedMatrix],
+               **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -605,11 +610,11 @@ def _build_mxm(out_type: DType,
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 # TODO: pass the mask to mxv
-def mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
+def mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector, **kwargs):
     assert left.ndims == 2
     assert right.ndims == 1
 
@@ -619,17 +624,20 @@ def mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], ri
     # Build and compile if needed
     key = ('mxv', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_mxv(out_type, op, left, right)
+        engine_cache[key] = _build_mxv(out_type, op, left, right, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [left._obj, right._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [left._obj.contents, right._obj.contents]
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
+
+    # Call the compiled function
     return Vector(out_type, [left.shape[0]], mem_out,
                   right._sparsity, right.perceived_ordering, intermediate_result=True)
 
-
-def _build_mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector):
+def _build_mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatrix], right: Vector, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -679,11 +687,11 @@ def _build_mxv(out_type: DType, op: Semiring, left: Union[Matrix, TransposedMatr
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 # TODO: pass the mask to vxm
-def vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
+def vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix], **kwargs):
     assert left.ndims == 1
     assert right.ndims == 2
 
@@ -693,17 +701,19 @@ def vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, Transp
     # Build and compile if needed
     key = ('vxm', op.name, out_type, *left.get_loop_key(), *right.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_vxm(out_type, op, left, right)
+        engine_cache[key] = _build_vxm(out_type, op, left, right, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [left._obj, right._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [left._obj.contents, right._obj.contents]
+
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
     return Vector(out_type, [right.shape[1]], mem_out,
                   left._sparsity, left.perceived_ordering, intermediate_result=True)
 
 
-def _build_vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix]):
+def _build_vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix, TransposedMatrix], **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -753,7 +763,7 @@ def _build_vxm(out_type: DType, op: Semiring, left: Vector, right: Union[Matrix,
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 def apply(out_type: DType, op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
@@ -761,7 +771,8 @@ def apply(out_type: DType, op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
           left: Optional[Scalar] = None,
           right: Optional[Scalar] = None,
           thunk: Optional[Scalar] = None,
-          inplace: bool = False):
+          inplace: bool = False,
+          **kwargs):
     if sp._obj is None:
         return sp.baseclass(out_type, sp.shape)
 
@@ -779,10 +790,11 @@ def apply(out_type: DType, op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
             raise GrbError("apply scalar not supported for IndexUnaryOp")
 
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_apply(out_type, op, sp, left, right)
-        mem_out = get_scalar_output_pointer(out_type)
-        arg_pointers = [get_scalar_input_arg(sp), mem_out]
-        engine_cache[key].invoke('main', *arg_pointers)
+            engine_cache[key] = _build_scalar_apply(out_type, op, sp, left, right, **kwargs)
+        input_pointers = [get_scalar_input_arg(sp)]
+        func = getattr(engine_cache[key], "mymain")
+        mem_out = func(*input_pointers)
+        mem_out = ctypes.pointer(mem_out)
         return Scalar.new(out_type, mem_out.contents.value)
 
     # Build and compile if needed
@@ -800,17 +812,21 @@ def apply(out_type: DType, op: Union[UnaryOp, BinaryOp, IndexUnaryOp],
         key = ('apply_indexunary', op.name, out_type, *sp.get_loop_key(), thunk._obj)
     if key not in engine_cache:
         if inplace:
-            engine_cache[key] = _build_apply_inplace(op, sp, left, right)
+            engine_cache[key] = _build_apply_inplace(op, sp, left, right, **kwargs)
         else:
-            engine_cache[key] = _build_apply(out_type, op, sp, left, right, thunk)
+            engine_cache[key] = _build_apply(out_type, op, sp, left, right, thunk, **kwargs)
 
     # Call the compiled function
     if inplace:
-        engine_cache[key].invoke('main', sp._obj)
+        input_pointers = [sp._obj.contents]
+        func = getattr(engine_cache[key], "mymain")
+        func(*input_pointers)
         return sp
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [sp._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [sp._obj.contents]
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
+    
     return sp.baseclass(out_type, sp.shape, mem_out,
                         sp._sparsity, sp.perceived_ordering, intermediate_result=True)
 
@@ -819,7 +835,8 @@ def _build_scalar_apply(out_type: DType,
                         op: Union[UnaryOp, BinaryOp],
                         sp: SparseTensorBase,
                         left: Optional[Scalar],
-                        right: Optional[Scalar]):
+                        right: Optional[Scalar],
+                        **kwargs):
     optype = type(op)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
@@ -840,7 +857,7 @@ def _build_scalar_apply(out_type: DType,
                 return result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 def _build_apply(out_type: DType,
@@ -848,7 +865,8 @@ def _build_apply(out_type: DType,
                  sp: SparseTensorBase,
                  left: Optional[Scalar],
                  right: Optional[Scalar],
-                 thunk: Optional[Scalar]):
+                 thunk: Optional[Scalar],
+                 **kwargs):
     optype = type(op)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
@@ -908,13 +926,14 @@ def _build_apply(out_type: DType,
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
                          sp: SparseTensorBase,
                          left: Optional[Scalar],
-                         right: Optional[Scalar]):
+                         right: Optional[Scalar],
+                         **kwargs):
     optype = type(op)
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
@@ -947,10 +966,9 @@ def _build_apply_inplace(op: Union[UnaryOp, BinaryOp],
                     scf.YieldOp([])
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
-
-def select(out_type: DType, op: SelectOp, sp: SparseTensor, thunk: Scalar):
+def select(out_type: DType, op: SelectOp, sp: SparseTensor, thunk: Scalar, **kwargs):
     # Handle case of empty tensor
     if sp._obj is None:
         return sp.__class__(out_type, sp.shape)
@@ -959,10 +977,11 @@ def select(out_type: DType, op: SelectOp, sp: SparseTensor, thunk: Scalar):
     if rank == 0:  # Scalar
         key = ('scalar_select', op.name, sp.dtype, thunk._obj)
         if key not in engine_cache:
-            engine_cache[key] = _build_scalar_select(op, sp, thunk)
-        mem_out = get_scalar_output_pointer(sp.dtype)
-        arg_pointers = [get_scalar_input_arg(sp), mem_out]
-        engine_cache[key].invoke('main', *arg_pointers)
+            engine_cache[key] = _build_scalar_select(op, sp, thunk, **kwargs)
+        input_pointers = [sp._obj.contents]
+        func = getattr(engine_cache[key], "mymain")
+        mem_out = func(*input_pointers)
+
         # Invocation returns True/False for whether to keep value
         if mem_out.contents.value:
             return Scalar.new(out_type, sp._obj)
@@ -973,23 +992,24 @@ def select(out_type: DType, op: SelectOp, sp: SparseTensor, thunk: Scalar):
     # Note that thunk is included in the key because it is inlined in the compiled code
     key = ('select', op.name, *sp.get_loop_key(), thunk._obj)
     if key not in engine_cache:
-        engine_cache[key] = _build_select(op, sp, thunk)
+        engine_cache[key] = _build_select(op, sp, thunk, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [sp._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [sp._obj.contents]
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
+
     res = sp.baseclass(sp.dtype, sp.shape, mem_out,
                        sp._sparsity, sp.perceived_ordering, intermediate_result=True)
 
     # _build_select cannot change output dtype; handle that now
     if out_type != sp.dtype:
-        res = dup(out_type, res, intermediate=True)
+        res = dup(out_type, res, intermediate=True, **kwargs)
 
     return res
 
-
-def _build_scalar_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
+def _build_scalar_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -1007,10 +1027,9 @@ def _build_scalar_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
                 return cmp
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
-
-def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
+def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -1057,33 +1076,34 @@ def _build_select(op: SelectOp, sp: SparseTensorBase, thunk: Scalar):
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
-def reduce_to_vector(out_type: DType, op: Monoid, mat: Union[Matrix, TransposedMatrix]):
+def reduce_to_vector(out_type: DType, op: Monoid, mat: Union[Matrix, TransposedMatrix], **kwargs):
     if mat._obj is None:
         return Vector.new(out_type, mat.shape[0])
 
     # Build and compile if needed
     key = ('reduce_to_vector', op.name, *mat.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_reduce_to_vector(op, mat)
+        engine_cache[key] = _build_reduce_to_vector(op, mat, **kwargs)
 
     # Call the compiled function
-    mem_out = get_sparse_output_pointer()
-    arg_pointers = [mat._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [mat._obj.contents]
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
     res = Vector(mat.dtype, [mat.shape[0]], mem_out,
                  [DimLevelType.compressed], [0], intermediate_result=True)
 
     # _build_reduce_to_vector cannot change output dtype; handle that now
     if out_type != mat.dtype:
-        res = dup(out_type, res, intermediate=True)
+        res = dup(out_type, res, intermediate=True, **kwargs)
 
     return res
 
 
-def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
+def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix], **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -1121,26 +1141,27 @@ def _build_reduce_to_vector(op: Monoid, mat: Union[Matrix, TransposedMatrix]):
                 return generic_op.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
-def reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase):
+def reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase, **kwargs):
     if sp._obj is None:
         return Scalar.new(out_type)
 
     # Build and compile if needed
     key = ('reduce_to_scalar', op.name, out_type, *sp.get_loop_key())
     if key not in engine_cache:
-        engine_cache[key] = _build_reduce_to_scalar(out_type, op, sp)
+        engine_cache[key] = _build_reduce_to_scalar(out_type, op, sp, **kwargs)
 
     # Call the compiled function
-    mem_out = get_scalar_output_pointer(out_type)
-    arg_pointers = [sp._obj, mem_out]
-    engine_cache[key].invoke('main', *arg_pointers)
+    input_pointers = [sp._obj.contents]
+    func = getattr(engine_cache[key], "mymain")
+    mem_out = func(*input_pointers)
+    mem_out = ctypes.pointer(mem_out)
     return Scalar.new(out_type, mem_out.contents.value)
 
 
-def _build_reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase):
+def _build_reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase, **kwargs):
     with ir.Context(), ir.Location.unknown():
         module = ir.Module.create()
         with ir.InsertionPoint(module.body):
@@ -1177,7 +1198,7 @@ def _build_reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase):
                 return s.result
             main.func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
-        return compile(module)
+        return compile(module, **kwargs)
 
 
 def extract(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size):
@@ -1235,13 +1256,13 @@ def extract(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices,
     return m
 
 
-def assign(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size=None):
+def assign(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices, row_size, col_size=None, **kwargs):
     # There may be a way to do this in MLIR, but for now we use numpy
     if tensor.ndims == 1:
         # Vector input
         if row_indices is None and col_size is None:
             # Vector output with GrB_ALL
-            return dup(out_type, tensor)
+            return dup(out_type, tensor, **kwargs)
 
         idx, vals = tensor.extract_tuples()
         if out_type != tensor.dtype:
@@ -1268,7 +1289,7 @@ def assign(out_type: DType, tensor: SparseTensorBase, row_indices, col_indices, 
 
     # Matrix input
     if row_indices is None and col_indices is None:
-        return dup(out_type, tensor)
+        return dup(out_type, tensor, **kwargs)
 
     rowidx, colidx, vals = tensor.extract_tuples()
     if out_type != tensor.dtype:
