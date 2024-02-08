@@ -22,72 +22,77 @@ def setup_tensor(mtxFile, matrix=True, sparse=True):
 
 def vecadd(a, b, index_instance=0, num_instances=1, options=""):
     c = tensor.Vector.new(a.dtype, a.shape[0])
-    operations.ewise_add(c, operators.BinaryOp.plus, a, b, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_add(c, operators.BinaryOp.plus, a, b, index_instance=index_instance, num_instances=num_instances, options=options)
     return c
 
 
 def vxv(a, b, index_instance=0, num_instances=1, options=""):
     c = tensor.Vector.new(a.dtype, a.shape[0])
-    operations.ewise_mult(c, operators.BinaryOp.times, a, b, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_mult(c, operators.BinaryOp.times, a, b, index_instance=index_instance, num_instances=num_instances, options=options)
     return c
 
+def vxm(a, B, index_instance=0, num_instances=1, options=""):
+    c = tensor.Vector.new(B.dtype, B.shape[1])
+    operations.vxm(c,operators.Semiring.plus_times, a, B, index_instance=index_instance, num_instances=num_instances, options=options)
+    return c
 
 def mxv(A, b, index_instance=0, num_instances=1, options=""):
     c = tensor.Vector.new(A.dtype, A.shape[0])
-    operations.mxv(c, operators.Semiring.plus_times, A, b, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.mxv(c, operators.Semiring.plus_times, A, b, index_instance=index_instance, num_instances=num_instances, options=options)
     return c
 
 
 def mxm(A, B, index_instance=0, num_instances=1, options=""):
     C = tensor.Matrix.new(A.dtype, A.shape[0], A.shape[1])
-    operations.mxm(C, operators.Semiring.plus_times, A, B, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.mxm(C, operators.Semiring.plus_times, A, B, index_instance=index_instance, num_instances=num_instances, options=options)
     return C
 
 
 def matadd(A, B, index_instance=0, num_instances=1, options=""):
     C = tensor.Matrix.new(A.dtype, A.shape[0], A.shape[1])
-    operations.ewise_add(C, operators.BinaryOp.plus, A, B, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_add(C, operators.BinaryOp.plus, A, B, index_instance=index_instance, num_instances=num_instances, options=options)
     return C
 
 
 def v_plus_v_plus_v(a, b, c, index_instance=0, num_instances=1,options=""):
     d = tensor.Vector.new(a.dtype, a.shape[0])
-    operations.ewise_add(d, operators.BinaryOp.plus, b, c, index_instance=index_instance, num_instances=num_instances,options=options)
-    operations.ewise_add(d, operators.BinaryOp.plus, a, d, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_add(d, operators.BinaryOp.plus, b, c, index_instance=index_instance, num_instances=num_instances, options=options)
+    operations.ewise_add(d, operators.BinaryOp.plus, a, d, index_instance=index_instance, num_instances=num_instances, options=options)
     return d
 
 
 def m_plus_m_plus_m(A, B, C, index_instance=0, num_instances=1, options=""):
     D = tensor.Matrix.new(A.dtype, A.shape[0], A.shape[1])
-    operations.ewise_add(D, operators.BinaryOp.plus, B, C, index_instance=index_instance, num_instances=num_instances,options=options)
-    operations.ewise_add(D, operators.BinaryOp.plus, A, D, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_add(D, operators.BinaryOp.plus, B, C, index_instance=index_instance, num_instances=num_instances, options=options)
+    operations.ewise_add(D, operators.BinaryOp.plus, A, D, index_instance=index_instance, num_instances=num_instances, options=options)
     return D
 
 
 def vxvxv(a, b, c, index_instance=0, num_instances=1, options=""):
     d = tensor.Vector.new(a.dtype, a.shape[0])
-    operations.ewise_mult(d, operators.BinaryOp.times, b, c, index_instance=index_instance, num_instances=num_instances,options=options)
-    operations.ewise_mult(d, operators.BinaryOp.times, a, d, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_mult(d, operators.BinaryOp.times, b, c, index_instance=index_instance, num_instances=num_instances, options=options)
+    operations.ewise_mult(d, operators.BinaryOp.times, a, d, index_instance=index_instance, num_instances=num_instances, options=options)
     return d
 
 
 def mxmxm(A, B, C, index_instance=0, num_instances=1, options=""):
     D = tensor.Matrix.new(A.dtype, A.shape[0], A.shape[1])
-    operations.mxm(D, operators.Semiring.plus_times, B, C, index_instance=index_instance, num_instances=num_instances,options=options)
-    operations.mxm(D, operators.Semiring.plus_times, A, D, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.mxm(D, operators.Semiring.plus_times, B, C, index_instance=index_instance, num_instances=num_instances, options=options)
+    operations.mxm(D, operators.Semiring.plus_times, A, D, index_instance=index_instance, num_instances=num_instances, options=options)
     return D
 
 
 def mxvxv(A, b, c, index_instance=0, num_instances=2, options=""):
     d = tensor.Vector.new(A.dtype, A.shape[0])
-    operations.ewise_mult(d, operators.BinaryOp.times,b, c, index_instance=index_instance+1, num_instances=num_instances,options=options)
-    operations.mxv(d, operators.Semiring.plus_times, A, d, index_instance=index_instance, num_instances=num_instances,options=options)
+    operations.ewise_mult(d, operators.BinaryOp.times,b, c, index_instance=index_instance+1, num_instances=num_instances, options=options)
+    operations.mxv(d, operators.Semiring.plus_times, A, d, index_instance=index_instance, num_instances=num_instances, options=options)
     return d
 
 
 def main():
     operations_dict = {"v+v":(vecadd,'v','v'),
                        "vxv":(vxv,'v','v'),
+                       "vxm":(vxm,'v','m'),
                        "mxv":(mxv,'m','v'),
                        "m+m":(matadd,'m','m'),
                        "mxm":(mxm,'m','m'),
@@ -128,11 +133,11 @@ def main():
         print(f"Shape={vector.shape}")
     print(f"Finished reading mtx in {(default_timer() - timer):.4f} seconds")
 
-    if contains_matrix_operation and 'v' in operands:
+    if contains_matrix_operation and 'v' in operand_types:
         print("Mixed tensor types, reading mtx as a vector too")
         timer2 = default_timer()
-        vector, shape2, num_elems2  = setup_tensor(mtxFile=args.mtxFile,matrix=False, sparse=not is_dense)
-        print(f"Shape={shape2}, Number of Entries={num_elems2}")
+        vector  = setup_tensor(mtxFile=args.mtxFile,matrix=False, sparse=not is_dense)
+        print(f"Shape={vector.shape}")
         print(f"Finished reading mtx in {(default_timer() - timer2):.4f} seconds")
     
     for operand in operand_types:
