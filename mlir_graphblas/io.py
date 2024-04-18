@@ -30,19 +30,39 @@ def from_mtx(mtx_fpath: str,sparsity: Optional[list[str]] = ["compressed", "comp
     return mtx_tensor
 
 
-def to_mtx(fout: str, mtx_tensor: Union[tensor.Matrix,tensor.Vector]) -> None:
+def to_mtx(fout: str, mtx_tensor: Union[tensor.Matrix,tensor.Vector],shape=[]) -> None:
     # write mlir matrix, vector, or scalar to matrix market file format .mtx
     if mtx_tensor.ndims == 0:  # scalar
         mtx = coo_array((mtx_tensor.extract_element(),(0, 0)), shape=(1,1))
         mmwrite(fout,mtx,field="real", symmetry="general")
     if mtx_tensor.ndims == 2:  # matrix
         row_indices,col_indices,data = mtx_tensor.extract_tuples()
-        num_rows = len(row_indices)
-        num_cols = len(col_indices)
+        if not shape:
+            num_rows = mtx_tensor.nrows()
+            num_cols = mtx_tensor.ncols()
+        else:
+            num_rows = shape[0]
+            num_cols = shape[1]
         mtx = coo_array((data,(row_indices,col_indices)), shape=(num_rows, num_cols))
         mmwrite(fout, mtx, field="real", symmetry="general")
     elif mtx_tensor.ndims == 1:  # vector
         row_indices,data = mtx_tensor.extract_tuples()
-        num_elems = len(row_indices)
+        if not shape:
+            num_elems = mtx_tensor.size()
+        else:
+            num_elems = shape[0]
         mtx = coo_array((data,(row_indices, np.zeros(num_elems))), shape=(num_elems,1))
         mmwrite(fout, mtx, field="real", symmetry="general")
+
+
+def to_dense_np(mlir_tensor):
+    if mlir_tensor.ndims == 2:
+        row_indices,col_indices,data = mlir_tensor.extract_tuples()
+        np_mtx = coo_array((data,(row_indices,col_indices)), shape=(7,7)).toarray()
+        return np_mtx
+    elif mlir_tensor.ndims == 1:
+        row_indices,data = mlir_tensor.extract_tuples()
+        np_vec = coo_array((data,(row_indices, np.zeros(len(row_indices)))), shape=(7,1)).toarray()
+        return np_vec
+    else:
+        raise ValueError
