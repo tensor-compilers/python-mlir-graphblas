@@ -441,8 +441,12 @@ def le(x, y, dtype):
 @BinaryOp._register
 def oneb(x, y, dtype):
     return dtype.build_constant(1)
+
+
 # Alias
-BinaryOp.pair = BinaryOp.oneb
+@BinaryOp._register
+def pair(x, y, dtype):
+    return dtype.build_constant(1)
 
 
 @BinaryOp._register
@@ -761,7 +765,7 @@ def lxnor(dtype):
 
 for monoid in (Monoid.plus, Monoid.min, Monoid.max):
     for binop in (BinaryOp.plus, BinaryOp.minus, BinaryOp.times, BinaryOp.div,
-                  BinaryOp.max, BinaryOp.min, BinaryOp.first, BinaryOp.second):
+                  BinaryOp.max, BinaryOp.min, BinaryOp.first, BinaryOp.second, BinaryOp.pair):
         Semiring._register(monoid, binop)
 
 for monoid in (Monoid.lor, Monoid.land, Monoid.lxor, Monoid.lxnor):

@@ -50,7 +50,10 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
     # Convert value mask to structural mask
     if not desc.mask_structure:
         zero = Scalar.new(mask.dtype, 0)
-        mask = select(mask.dtype, SelectOp.valuene, mask, thunk=zero)
+        mask = select(mask.dtype, SelectOp.valuene, mask, thunk=zero, **kwargs)
+        if "index_instance" in kwargs:
+            kwargs["index_instance"] += 1
+        print("Selected Mask:",mask.extract_tuples())
 
     # Build and compile if needed
     key = ('select_by_mask', *sp.get_loop_key(), *mask.get_loop_key(), desc.mask_complement)
@@ -59,7 +62,7 @@ def select_by_mask(sp: SparseTensorBase, mask: SparseTensor, desc: Descriptor = 
 
 
     # Call the compiled function
-    input_pointers = [mask._obj.contents, mask._obj.contents]
+    input_pointers = [mask._obj.contents, sp._obj.contents]
     func = getattr(engine_cache[key], "mymain")
     mem_out = func(*input_pointers)
     mem_out = ctypes.pointer(mem_out)
@@ -1157,8 +1160,7 @@ def reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase, **kwargs
     input_pointers = [sp._obj.contents]
     func = getattr(engine_cache[key], "mymain")
     mem_out = func(*input_pointers)
-    mem_out = ctypes.pointer(mem_out)
-    return Scalar.new(out_type, mem_out.contents.value)
+    return Scalar.new(out_type,mem_out)
 
 
 def _build_reduce_to_scalar(out_type: DType, op: Monoid, sp: SparseTensorBase, **kwargs):

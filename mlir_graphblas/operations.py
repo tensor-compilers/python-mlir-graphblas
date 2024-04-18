@@ -110,7 +110,6 @@ def update(output: SparseObject,
             result = impl.ewise_add(output.dtype, BinaryOp.oneb, output, tensor, **kwargs)
     elif mask is None or not desc.replace:
         # eWiseAdd using accum
-        print("running ewise_add using accum in update()")
         result = impl.ewise_add(output.dtype, accum, output, tensor, **kwargs)
     else:
         # Mask the output, then perform eWiseAdd using accum
@@ -265,6 +264,8 @@ def mxm(out: Matrix,
     # TODO: apply the mask during the computation, not at the end
     result = impl.mxm(out.dtype, op, left, right, **kwargs)
     if mask is not None:
+        if "index_instance" in kwargs:
+            kwargs["index_instance"] += 1
         result = impl.select_by_mask(result, mask, desc, **kwargs)
     update(out, result, mask, accum, desc, **kwargs)
 
