@@ -4,18 +4,19 @@ from mlir_graphblas import types, tensor, operators, operations
 
 
 def main():
+    options="parallelization-strategy=any-storage-outer-loop"
     indices_a = [(0, 1), (1, 0), (1, 2)]
     indices_b = [0, 1, 2]
 
-    A = tensor.Matrix.new(types.FP32, 5, 5)
+    A = tensor.Matrix.new(types.FP64, 5, 5)
     A.build(*list(zip(*indices_a)), [3, 2, 5], colwise=False, sparsity=["compressed", "compressed"])
 
-    b = tensor.Vector.new(types.FP32, 5)
+    b = tensor.Vector.new(types.FP64, 5)
     b.build(indices_b, [3, 4, 5], sparsity=["dense"])
 
-    c = tensor.Vector.new(types.FP32, 5)
+    c = tensor.Vector.new(types.FP64, 5)
 
-    operations.mxv(c, operators.Semiring.plus_times, A, b)
+    operations.mxv(c, operators.Semiring.plus_times, A, b,options=options)
     print(c.extract_tuples())
     
 

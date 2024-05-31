@@ -276,7 +276,7 @@ class Vector(SparseTensor):
 
         from . import implementations as impl
 
-        return impl.nvals(self, kwargs=kwargs)
+        return impl.nvals(self, **kwargs)
 
     def build(self, indices, values, *, dup=None, sparsity=None):
         """
